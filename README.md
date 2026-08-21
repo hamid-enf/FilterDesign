@@ -97,6 +97,7 @@ FilterCoeff/
 | [پژوهش فنی](docs/ALGORITHM_REFERENCES.md) | منابع و فرمول‌های الگوریتم‌ها |
 | [اعتبارسنجی مرجع](docs/reference_validation.md) | روش مقایسه با SciPy |
 | CI | فایل `ci/ci.yml` — برای فعال‌سازی به `.github/workflows/` کپی کنید |
+| Adapter | `include/filtercoeff_adapter.h` — تبدیل به فرمت scipy/MATLAB/CMSIS |
 
 ## ویژگی‌ها
 

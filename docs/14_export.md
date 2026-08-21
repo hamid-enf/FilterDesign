@@ -110,6 +110,24 @@ o.precision = 9;                   /* رقم‌های اعشار (0 = خودکا
 o.include_quantized = 1;           /* آرایه‌های Q15/Q31 هم تولید شود */
 ```
 
+## Adapter (اختیاری)
+
+`include/filtercoeff_adapter.h` قالب ضرایب را برای چند runtime رایج آماده می‌کند:
+
+```c
+#include "filtercoeff_adapter.h"
+
+double sos6[6 * n];                 /* scipy/MATLAB: [b0,b1,b2,a0,a1,a2] */
+fce_adapter_sos_to_scipy(&result, sos6);
+
+int16_t q6[6 * n];                  /* Q15 با a0 = 32767 */
+fce_adapter_sos_q15_to_6(&result, q6);
+
+int shift = fce_adapter_sec_shift_bits(&result, 0, NULL); /* مقیاس توان-دو */
+```
+
+این لایه بخشی از هسته نیست؛ هر زمان که runtime شما همان قالب FilterCoeff را دارد (CMSIS-DSP: `[b0,b1,b2,a1,a2]`) اصلاً به آن نیاز ندارید.
+
 ## استفادهٔ عملی — اتصال به کتابخانهٔ خارجی
 
 ```c
