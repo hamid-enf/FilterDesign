@@ -1092,5 +1092,6 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
 
     r->order = (uint16_t)n;
     r->section_gains = sec_gains;
+    r->norm_factor = 1.0; /* total gain is embedded in the SOS */
     return FCE_OK;
 }

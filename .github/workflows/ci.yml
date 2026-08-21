@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build library (GCC, strict C99)
+        run: make lib
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build examples
+        run: make examples
+
+      - name: Run benchmark smoke test
+        run: make bench
+
+      - name: Build with clang (if available)
+        run: |
+          if command -v clang >/dev/null; then
+            make clean
+            make CC=clang lib
+            make CC=clang test
+          fi
+
+      - name: Feature-minimal build (FIR only, no fixed-point)
+        run: |
+          make clean
+          gcc -O2 -std=c99 -Wall -DFCE_ENABLE_IIR=0 -DFCE_ENABLE_FIXED_POINT=0 \
+              -DFCE_ENABLE_SIMULATION=0 -DFCE_ENABLE_EXPORT=0 \
+              -Iinclude src/fce_math.c src/fce_fir.c src/fce_validate.c \
+              src/fce_generate.c -lm -o /tmp/min_build.o
+          echo "minimal build OK"
+
+      - name: Reference validation vs SciPy
+        run: |
+          python3 -m pip install --user numpy scipy
+          make ref
+
+      - name: Static analysis (gcc -fanalyzer)
+        run: |
+          make clean
+          gcc -O0 -std=c99 -fanalyzer -Wall -Iinclude -c src/fce_math.c -o /dev/null
+          gcc -O0 -std=c99 -fanalyzer -Wall -Iinclude -c src/fce_iir.c -o /dev/null
+          gcc -O0 -std=c99 -fanalyzer -Wall -Iinclude -c src/fce_generate.c -o /dev/null
+          gcc -O0 -std=c99 -fanalyzer -Wall -Iinclude -c src/fce_fir.c -o /dev/null
