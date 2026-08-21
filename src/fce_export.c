@@ -208,7 +208,7 @@ static int fce_export_header(fce_writer_t* w, const fce_result_t* r)
                           (unsigned)r->order, (unsigned)r->num_sections))
             return 0;
     }
-    if (!fce_w_printf(w, ") */\n"))
+    if (!fce_w_printf(w, " */\n"))
         return 0;
     if (!fce_w_printf(w, "/* Fs = %.1f Hz", r->fs))
         return 0;
