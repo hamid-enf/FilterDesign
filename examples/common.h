@@ -8,8 +8,14 @@
 
 #define EX_WS_SIZE (1u << 18)
 
+#if defined(__GNUC__) || defined(__clang__)
+#define EX_UNUSED __attribute__((unused))
+#else
+#define EX_UNUSED
+#endif
+
 /* design + print the markdown report to stdout */
-static void ex_design_and_report(const char* title, fce_spec_t* sp)
+static EX_UNUSED void ex_design_and_report(const char* title, fce_spec_t* sp)
 {
     static uint8_t mem[EX_WS_SIZE];
     fce_workspace_t ws = { mem, sizeof(mem) };
@@ -31,7 +37,7 @@ static void ex_design_and_report(const char* title, fce_spec_t* sp)
 }
 
 /* print the float coefficients of a FIR design */
-static void ex_print_fir(fce_spec_t* sp)
+static EX_UNUSED void ex_print_fir(fce_spec_t* sp)
 {
     static uint8_t mem[EX_WS_SIZE];
     fce_workspace_t ws = { mem, sizeof(mem) };
@@ -57,7 +63,7 @@ static void ex_print_fir(fce_spec_t* sp)
 }
 
 /* print the SOS of an IIR design */
-static void ex_print_sos(fce_spec_t* sp)
+static EX_UNUSED void ex_print_sos(fce_spec_t* sp)
 {
     static uint8_t mem[EX_WS_SIZE];
     fce_workspace_t ws = { mem, sizeof(mem) };
