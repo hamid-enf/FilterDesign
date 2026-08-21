@@ -1,0 +1,7 @@
+*.o
+*.a
+tests/run_tests
+tools/reference/fce_dump
+bench/bench_design
+examples/example_*
+__pycache__/
