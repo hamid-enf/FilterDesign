@@ -52,12 +52,19 @@ size_t fce_mem_writer_write(void* ctx, const char* data, size_t len)
 {
     fce_mem_writer_t* mw = (fce_mem_writer_t*)ctx;
     size_t room = (mw->pos < mw->size) ? (mw->size - mw->pos) : 0u;
-    size_t n = (len < room) ? len : room;
+    size_t n;
+    /* keep one byte for the NUL terminator so the buffer is always a
+     * valid C string (strstr-safe) */
+    if (room > 0u)
+        room -= 1u;
+    n = (len < room) ? len : room;
     if (n > 0u)
     {
         memcpy(mw->buf + mw->pos, data, n);
         mw->pos += n;
     }
+    if (mw->pos < mw->size)
+        mw->buf[mw->pos] = '\0';
     if (n < len)
         mw->truncated = 1;
     return n;

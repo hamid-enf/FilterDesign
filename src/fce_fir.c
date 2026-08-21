@@ -334,17 +334,17 @@ fce_status_t fce_fir_design(const fce_spec_t* sp, fce_result_t* r,
     r->norm_factor = 1.0 / norm_gain;
     r->normalization = norm;
 
-    /* ---- float32 output ---- */
+    /* ---- float32 output (float64 always available: internal math is
+     * float64; float32 is only the final rounding) ---- */
+    r->h_f64 = h;
     if (sp->precision == FCE_PRECISION_FLOAT32)
     {
         for (n = 0; n < N; n++)
             h32[n] = (float)h[n];
         r->h_f32 = h32;
-        r->h_f64 = NULL;
     }
     else
     {
-        r->h_f64 = h;
         r->h_f32 = NULL;
     }
 

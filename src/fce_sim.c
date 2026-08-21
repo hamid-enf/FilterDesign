@@ -61,12 +61,13 @@ uint32_t fce_sim_signal(fce_sim_signal_t kind, double a, double b,
         return n;
 
     case FCE_SIM_MULTITONE:
+        /* a = f1 [Hz], b = f2 [Hz], unity amplitude */
         for (i = 0; i < n; i++)
         {
             double t = (double)i / fs;
-            out[i] = b * (sin(2.0 * FCE_PI * a * t)
-                        + sin(2.0 * FCE_PI * b * t)
-                        + sin(2.0 * FCE_PI * (2.0 * a + b) * t));
+            out[i] = sin(2.0 * FCE_PI * a * t)
+                   + sin(2.0 * FCE_PI * b * t)
+                   + sin(2.0 * FCE_PI * (2.0 * a + b) * t);
         }
         return n;
 

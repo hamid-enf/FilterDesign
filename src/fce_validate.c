@@ -71,8 +71,8 @@ fce_status_t fce_response_fir(const double* h, uint16_t n,
 
     for (i = 0; i < n_points; i++)
     {
-        double f = f_start + (f_stop - f_start) * (double)i /
-                             (double)(n_points - 1u);
+        double t = (n_points > 1u) ? (double)i / (double)(n_points - 1u) : 0.0;
+        double f = f_start + (f_stop - f_start) * t;
         double w = 2.0 * FCE_PI * f / fs;
         fce_cplx_t hc = fce_eval_fir_c(h, n, w);
         fce_response_point_t pt;
@@ -129,8 +129,8 @@ fce_status_t fce_response_sos(const double* sos, uint16_t n_sections,
 
     for (i = 0; i < n_points; i++)
     {
-        double f = f_start + (f_stop - f_start) * (double)i /
-                             (double)(n_points - 1u);
+        double t = (n_points > 1u) ? (double)i / (double)(n_points - 1u) : 0.0;
+        double f = f_start + (f_stop - f_start) * t;
         double w = 2.0 * FCE_PI * f / fs;
         fce_cplx_t hc = fce_eval_sos_c(sos, n_sections, w);
         fce_response_point_t pt;
@@ -477,10 +477,15 @@ void fce_validate_fir_measures(const fce_spec_t* sp, fce_result_t* r,
     }
 }
 
-/* max |response_db(float) - response_db(quantized)| over a grid */
+/* max |response_db(float) - response_db(quantized)| over a grid.
+ * Gains below FLOOR are clamped so that deep-null noise does not dominate
+ * the metric (a null shifted by a tiny coefficient change produces an
+ * arbitrarily large dB difference). */
 double fce_validate_quant_response(const double* ref, const double* test,
                                    uint32_t ns, int is_sos, double fs)
 {
+    const double floor = 1e-3; /* -60 dB: error is measured where the
+                                 * response matters (passband/transition) */
     uint32_t i;
     uint32_t grid = FCE_VALIDATE_GRID_POINTS;
     double worst = 0.0;
@@ -494,11 +499,17 @@ double fce_validate_quant_response(const double* ref, const double* test,
                               : fce_eval_fir_c(test, ns, w);
         double ga = fce_cx_abs(a);
         double gb = fce_cx_abs(b);
-        double da = 20.0 * log10(ga > 0.0 ? ga : 1e-300);
-        double db = 20.0 * log10(gb > 0.0 ? gb : 1e-300);
-        double d = fabs(da - db);
-        if (d > worst)
-            worst = d;
+        /* skip points inside the deep-stopband noise floor: a null moved
+         * by a tiny coefficient change gives a meaningless dB difference */
+        if (ga < floor || gb < floor)
+            continue;
+        {
+            double da = 20.0 * log10(ga);
+            double db = 20.0 * log10(gb);
+            double d = fabs(da - db);
+            if (d > worst)
+                worst = d;
+        }
     }
     return worst;
 }

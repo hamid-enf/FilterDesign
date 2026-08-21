@@ -64,8 +64,12 @@ bool fce_layout_compute(const fce_spec_t* spec, fce_layout_t* lay)
             if (spec->window == FCE_WIN_KAISER &&
                 spec->stopband_atten_db > 0.0 &&
                 spec->transition_hz > 0.0 && spec->fs > 0.0)
+            {
                 est = fce_kaiser_taps(spec->stopband_atten_db,
                                       spec->transition_hz, spec->fs);
+                if (est > FCE_MAX_FIR_TAPS)
+                    est = FCE_MAX_FIR_TAPS; /* clamping handled at design */
+            }
             n_taps = (est > 0u) ? est : FCE_MAX_FIR_TAPS;
         }
         if (n_taps == 0u || n_taps > FCE_MAX_FIR_TAPS)

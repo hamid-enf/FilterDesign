@@ -1080,22 +1080,14 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
         r->sos_order = sp->sos_order;
     }
 
-    /* ---- float32 output ---- */
+    /* ---- float32 output (float64 always available) ---- */
+    r->sos_f64 = sos;
     {
         float* sos32 = (float*)(void*)((char*)base + lay->off_sos32);
         uint32_t ns = lay->n_sections;
         for (i = 0; i < 5u * ns; i++)
             sos32[i] = (float)sos[i];
-        if (sp->precision == FCE_PRECISION_FLOAT32)
-        {
-            r->sos_f32 = sos32;
-            r->sos_f64 = NULL;
-        }
-        else
-        {
-            r->sos_f64 = sos;
-            r->sos_f32 = NULL;
-        }
+        r->sos_f32 = (sp->precision == FCE_PRECISION_FLOAT32) ? sos32 : NULL;
     }
 
     r->order = (uint16_t)n;

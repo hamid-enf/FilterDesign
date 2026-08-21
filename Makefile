@@ -21,9 +21,6 @@ SRC := \
 OBJ := $(SRC:.c=.o)
 LIB := libfiltercoeff.a
 
-TEST_SRC := $(wildcard tests/test_*.c)
-TEST_OBJ := $(TEST_SRC:.c=.o)
-
 EXAMPLE_SRC := $(wildcard examples/example_*.c)
 EXAMPLE_BIN := $(EXAMPLE_SRC:.c=)
 
@@ -39,9 +36,8 @@ $(LIB): $(OBJ)
 %.o: %.c include/filtercoeff.h include/filtercoeff_config.h src/fce_internal.h
 	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
-test: $(LIB) $(TEST_OBJ)
-	$(CC) $(CFLAGS) $(INCLUDE) $(TEST_OBJ) $(LIB) $(LDLIBS) -o tests/run_tests
-	./tests/run_tests
+test: $(LIB)
+	./tests/run_all.sh
 
 ref: $(LIB)
 	$(MAKE) -C tools/reference run
@@ -56,5 +52,5 @@ $(EXAMPLE_BIN): %: %.c $(LIB)
 	$(CC) $(CFLAGS) $(INCLUDE) $< $(LIB) $(LDLIBS) -o $@
 
 clean:
-	rm -f $(OBJ) $(LIB) tests/run_tests tests/*.o
+	rm -f $(OBJ) $(LIB)
 	rm -f $(EXAMPLE_BIN) tools/reference/fce_dump bench/bench_design

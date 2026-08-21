@@ -499,7 +499,7 @@ typedef enum fce_sim_signal
 /*
  * Generate a test signal. `a` and `b` are generator arguments:
  *   SINE:          a = frequency [Hz],        b = amplitude
- *   MULTITONE:     a = f1 [Hz],               b = f2 [Hz]  (three tones: f1, f2, 2*f1+f2)
+ *   MULTITONE:     a = f1 [Hz],               b = f2 [Hz]  (three unity tones: f1, f2, 2*f1+f2)
  *   IMPULSE:       a = sample index of impulse, b = amplitude
  *   STEP:          a = step start sample,     b = amplitude
  *   WHITE_NOISE:   a = seed,                  b = amplitude (uniform [-b, b])

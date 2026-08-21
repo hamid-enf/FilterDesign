@@ -182,6 +182,10 @@ static inline float* fce_lp_flt(void* base, size_t off)
 /* shared numeric helpers                                              */
 /* ------------------------------------------------------------------ */
 
+/* window value at index n of an N-point window (shared with tests) */
+double fce_window_value(fce_window_t win, uint32_t n, uint32_t N,
+                        double kaiser_beta, double tukey_alpha);
+
 /* Kaiser parameters from attenuation (Oppenheim & Schafer). */
 double fce_kaiser_beta(double atten_db);
 /* Kaiser tap estimate: transition_hz, fs, atten_db. Returns >= 1. */
