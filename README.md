@@ -96,6 +96,7 @@ FilterCoeff/
 | [فصل ۱۸](docs/18_troubleshooting.md) | عیب‌یابی |
 | [پژوهش فنی](docs/ALGORITHM_REFERENCES.md) | منابع و فرمول‌های الگوریتم‌ها |
 | [اعتبارسنجی مرجع](docs/reference_validation.md) | روش مقایسه با SciPy |
+| CI | فایل `ci/ci.yml` — برای فعال‌سازی به `.github/workflows/` کپی کنید |
 
 ## ویژگی‌ها
 
