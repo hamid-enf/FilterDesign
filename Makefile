@@ -24,7 +24,7 @@ LIB := libfiltercoeff.a
 EXAMPLE_SRC := $(wildcard examples/example_*.c)
 EXAMPLE_BIN := $(EXAMPLE_SRC:.c=)
 
-.PHONY: all lib test ref bench examples clean
+.PHONY: all lib test ref bench examples pycheck matref clean
 
 all: lib
 
@@ -50,6 +50,16 @@ examples: $(LIB) $(EXAMPLE_BIN)
 
 $(EXAMPLE_BIN): %: %.c $(LIB)
 	$(CC) $(CFLAGS) $(INCLUDE) $< $(LIB) $(LDLIBS) -o $@
+
+# Validate the pure-Python port against the C library (no scipy needed).
+pycheck: lib
+	$(MAKE) -C tools/reference fce_dump
+	python3 python/compare_c.py tools/reference/fce_dump
+
+# Export MATLAB reference CSVs from the C library.
+matref: lib
+	$(MAKE) -C tools/reference fce_dump
+	python3 tools/export_matlab_reference.py tools/reference/fce_dump
 
 clean:
 	rm -f $(OBJ) $(LIB)

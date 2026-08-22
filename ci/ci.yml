@@ -1,8 +1,7 @@
 # GitHub Actions CI for FilterCoeff
 #
-# ACTIVATE: copy this file to .github/workflows/ci.yml in your fork/repo
-# (a GitHub App without the 'workflows' permission cannot push workflow
-# files, so it lives here by convention).
+# The live workflow lives at .github/workflows/ci.yml. This copy is kept
+# here as a readable source of reference for contributors.
 #
 name: CI
 

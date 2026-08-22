@@ -171,7 +171,6 @@ static void test_null_and_abuse(void)
 {
     fce_spec_t sp;
     fce_result_t r;
-    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
     fce_spec_defaults(&sp);
     sp.kind = FCE_KIND_FIR;
     sp.fs = 48000; sp.fc1 = 5000; sp.num_taps = 33;

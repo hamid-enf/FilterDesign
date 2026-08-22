@@ -52,8 +52,9 @@ if (fce_generate(&spec, &result, &ws) == FCE_OK)
 make            # ساخت libfiltercoeff.a
 make test       # اجرای ۵۹۰۰+ تست واحد
 make ref        # مقایسه با SciPy (نیازمند python3 + scipy)
-make examples   # ساخت ۲۰ مثال
+make examples   # ساخت ۱۰ مثال
 make bench      # بنچمارک زمان طراحی
+make pycheck    # بررسی پورت پایتون در برابر C (فقط python3، بدون scipy)
 ```
 
 فقط فایل‌های `include/` و `src/` را به پروژهٔ خود اضافه کنید؛ هیچ وابستگی خارجی جز `<stdint.h> <stddef.h> <stdbool.h> <math.h>` نیست.
@@ -64,11 +65,13 @@ make bench      # بنچمارک زمان طراحی
 FilterCoeff/
 ├── include/          ← فایل‌های سرآیند عمومی (filtercoeff.h)
 ├── src/              ← پیاده‌سازی (C99، بدون تخصیص پویا)
-├── examples/         ← ۲۰ مثال کامل
+├── examples/         ← ۱۰ مثال کامل (مثلاً `./examples/example_01_fir_lowpass`)
 ├── tests/            ← تست‌های واحد (بیش از ۵۹۰۰ بررسی)
 ├── bench/            ← بنچمارک زمان طراحی
 ├── tools/reference/  ← ابزار مقایسه با SciPy
-├── docs/             ← مستندات کامل فارسی (۱۸ فصل)
+├── python/           ← پورت خالص پایتون (filtercoeff.py) + ابزار مقایسه
+├── matlab/           ← پورت متلب (filtercoeff.m) + مثال و اعتبارسنجی
+├── docs/             ← مستندات کامل فارسی
 └── .github/workflows/← CI
 ```
 
@@ -94,6 +97,7 @@ FilterCoeff/
 | [فصل ۱۶](docs/16_esp32c2.md) | ESP32-C2 |
 | [فصل ۱۷](docs/17_examples.md) | مثال‌ها |
 | [فصل ۱۸](docs/18_troubleshooting.md) | عیب‌یابی |
+| [فصل ۱۹](docs/19_python_matlab_ports.md) | پورت‌های Python و MATLAB + ارزیابی دقت |
 | [پژوهش فنی](docs/ALGORITHM_REFERENCES.md) | منابع و فرمول‌های الگوریتم‌ها |
 | [اعتبارسنجی مرجع](docs/reference_validation.md) | روش مقایسه با SciPy |
 | CI | فایل `ci/ci.yml` — برای فعال‌سازی به `.github/workflows/` کپی کنید |
@@ -129,6 +133,36 @@ make ref
 ```
 
 همچنین ۶۰ طراحی تصادفی (مرتبهٔ ۲ تا ۱۰، هر ۵ خانواده، هر ۴ نوع پاسخ) با حداکثر خطای ضرایب ~1e-13 بررسی شده است.
+
+## پورت‌های Python و MATLAB
+
+علاوه بر کتابخانهٔ C، دو پورت **۱:۱** از همان الگوریتم‌ها ارائه شده است تا بتوانید ضرایب را در پایتون و متلب هم تولید کنید — بدون وابستگی به SciPy یا جعبه‌ابزار Signal Processing:
+
+- **پورت پایتون:** `python/filtercoeff.py` (فقط کتابخانهٔ استاندارد). مثال: `python3 python/example.py`
+- **پورت متلب:** `matlab/filtercoeff.m` + `matlab/filtercoeff_quantize.m`. مثال: `filtercoeff_demo` در متلب.
+
+### دقت (خروجی سه پیاده‌سازی)
+
+همهٔ پیاده‌سازی‌ها همان محاسبهٔ float64 را اجرا می‌کنند، بنابراین خروجی‌ها تا حدود **~1e-15** یکسان‌اند (در حد خطای گرد کردن ماشین):
+
+```text
+C library  <->  Python port   : 76/76 checks, max coeff error < 1e-12
+Python port <-> SciPy (reference): 105/105 checks, 0 failures
+MATLAB port (همان الگوریتم، خط‌به‌خط پورت پایتون): با `validate_filtercoeff` در متلب
+```
+
+اعتبارسنجی پورت پایتون در برابر C به این شکل اجرا می‌شود:
+
+```sh
+make                    # ساخت کتابخانه
+make -C tools/reference fce_dump
+python3 python/compare_c.py tools/reference/fce_dump
+# C vs Python port: 76 checks, 0 failures
+```
+
+برای متلب، ضرایب مرجع در `matlab/reference/*.csv` (خروجی خود کتابخانهٔ C) قرار دارد و اسکریپت `matlab/validate_filtercoeff.m` آن‌ها را با پورت متلب مقایسه می‌کند.
+
+> قرارداد امضای ضرایب در هر سه پیاده‌سازی یکسان است (فصل ۷).
 
 ## مجوز
 
