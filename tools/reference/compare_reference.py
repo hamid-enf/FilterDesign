@@ -377,9 +377,13 @@ def main():
             a1 = rec[:, 3]
             a2 = rec[:, 4]
             disc = a1 * a1 - 4.0 * a2
-            r = np.where(disc >= 0,
-                         np.maximum(np.abs(0.5 * (-a1 + np.sqrt(disc))),
-                                    np.abs(0.5 * (-a1 - np.sqrt(disc)))),
+            # guard against sqrt of a negative discriminant to avoid
+            # numpy RuntimeWarnings (complex-conjugate case uses |a2|)
+            pos = disc >= 0
+            sd = np.sqrt(np.where(pos, disc, 0.0))
+            r = np.where(pos,
+                         np.maximum(np.abs(0.5 * (-a1 + sd)),
+                                    np.abs(0.5 * (-a1 - sd))),
                          np.sqrt(np.abs(a2)))
             check(cid, np.all(r < 1.0), "quantized stability")
 

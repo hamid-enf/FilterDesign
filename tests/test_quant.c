@@ -1,6 +1,7 @@
 /* test_quant.c - Q15/Q31 conversion, scaling strategies, error metrics. */
 #include "filtercoeff.h"
 #include "test_harness.h"
+#include <stdlib.h>
 
 int g_tests_run = 0;
 int g_tests_failed = 0;
