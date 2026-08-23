@@ -40,12 +40,16 @@ static void fce_quant_apply(const double* c, uint32_t n,
                             const fce_quant_cfg_t* cfg,
                             const double* scales, /* per coefficient */
                             int16_t* q15, int32_t* q31,
-                            double* max_abs, double* rms, double* max_rel)
+                            double* max_abs, double* rms, double* max_rel,
+                            uint32_t* overflow_cnt)
 {
     uint32_t i;
     double sse = 0.0;
     double mx = 0.0;
     double mr = 0.0;
+
+    if (overflow_cnt)
+        *overflow_cnt = 0;
 
     for (i = 0; i < n; i++)
     {
@@ -59,11 +63,20 @@ static void fce_quant_apply(const double* c, uint32_t n,
         else
             q = 0;
 
-        /* saturation / overflow check */
+        /* saturation / overflow check: count it HERE - the stored value
+         * is clamped, so inspecting the array later can never see it */
         if (q > cfg->qmax)
+        {
             q = cfg->qmax;
-        if (q < -cfg->qmax)
+            if (overflow_cnt)
+                (*overflow_cnt)++;
+        }
+        else if (q < -cfg->qmax)
+        {
             q = -cfg->qmax;
+            if (overflow_cnt)
+                (*overflow_cnt)++;
+        }
 
         if (q15)
             q15[i] = (int16_t)q;
@@ -216,19 +229,7 @@ static fce_status_t fce_quant_core(const double* c, uint32_t n,
     fce_quant_apply(c, n, &cfg, scales,
                     qf == FCE_QFORMAT_Q15 ? q15 : NULL,
                     qf == FCE_QFORMAT_Q31 ? q31 : NULL,
-                    max_abs, rms, max_rel);
-
-    /* detect saturation actually applied (rounding cannot exceed qmax
-     * with these scales, but guard anyway) */
-    /* only inspect the array that was actually written */
-    if (qf == FCE_QFORMAT_Q15 && q15 != NULL)
-        for (i = 0; i < n; i++)
-            if ((int64_t)q15[i] > cfg.qmax || (int64_t)q15[i] < -cfg.qmax)
-                (*overflow_cnt)++;
-    if (qf == FCE_QFORMAT_Q31 && q31 != NULL)
-        for (i = 0; i < n; i++)
-            if ((int64_t)q31[i] > cfg.qmax || (int64_t)q31[i] < -cfg.qmax)
-                (*overflow_cnt)++;
+                    max_abs, rms, max_rel, overflow_cnt);
 
     return FCE_OK;
 }

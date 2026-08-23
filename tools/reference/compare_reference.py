@@ -334,6 +334,99 @@ def main():
             check(cid, abs(case["order"] - n_ref) <= TOL_ORD,
                   f"auto order {case['order']} vs ellipord {n_ref}")
 
+        if cid == "iir_butter_auto_bs":
+            n_ref, wn_ref = signal.buttord([1500, 9000], [2500, 6000],
+                                           1, 50, fs=48000)
+            check(cid, abs(case["order"] - n_ref) <= TOL_ORD,
+                  f"auto order {case['order']} vs buttord {n_ref}")
+            # the bandstop passband-edge optimization has an extremely
+            # flat valley; two independent optimizers land ~1e-5 relative
+            # apart with the SAME order and objective. Use a 5e-5
+            # relative tolerance (still catches structural mistakes),
+            # plus a hard spec-compliance check of the final design.
+            check(cid, abs(case["design_fc1"] - wn_ref[0])
+                  / wn_ref[0] < 5e-5,
+                  f"design fc1 {case['design_fc1']} vs {wn_ref[0]}")
+            check(cid, abs(case["design_fc2"] - wn_ref[1])
+                  / wn_ref[1] < 5e-5,
+                  f"design fc2 {case['design_fc2']} vs {wn_ref[1]}")
+            # spec compliance at the original edges
+            sos = np.array(case["sos"])
+            def _mag(f):
+                z = np.exp(-1j * 2 * np.pi * f / 48000)
+                return abs(np.prod([(s[0] + s[1]*z + s[2]*z*z) /
+                                    (1 + s[3]*z + s[4]*z*z) for s in sos]))
+            for f in (1500.0, 9000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) < 1.0 + 0.05,
+                      f"passband edge {f} Hz: {20*np.log10(g):.3f} dB")
+            for f in (2500.0, 6000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) > 50.0 - 0.1,
+                      f"stopband edge {f} Hz: {-20*np.log10(max(g,1e-300)):.2f} dB att")
+
+        if cid == "iir_cheby1_auto_bs":
+            n_ref, wn_ref = signal.cheb1ord([1500, 9000], [2500, 6000],
+                                            1, 50, fs=48000)
+            check(cid, abs(case["order"] - n_ref) <= TOL_ORD,
+                  f"auto order {case['order']} vs cheb1ord {n_ref}")
+            # the bandstop passband-edge optimization has an extremely
+            # flat valley; two independent optimizers land ~1e-5 relative
+            # apart with the SAME order and objective. Use a 5e-5
+            # relative tolerance (still catches structural mistakes),
+            # plus a hard spec-compliance check of the final design.
+            check(cid, abs(case["design_fc1"] - wn_ref[0])
+                  / wn_ref[0] < 5e-5,
+                  f"design fc1 {case['design_fc1']} vs {wn_ref[0]}")
+            check(cid, abs(case["design_fc2"] - wn_ref[1])
+                  / wn_ref[1] < 5e-5,
+                  f"design fc2 {case['design_fc2']} vs {wn_ref[1]}")
+            # spec compliance at the original edges
+            sos = np.array(case["sos"])
+            def _mag(f):
+                z = np.exp(-1j * 2 * np.pi * f / 48000)
+                return abs(np.prod([(s[0] + s[1]*z + s[2]*z*z) /
+                                    (1 + s[3]*z + s[4]*z*z) for s in sos]))
+            for f in (1500.0, 9000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) < 1.0 + 0.05,
+                      f"passband edge {f} Hz: {20*np.log10(g):.3f} dB")
+            for f in (2500.0, 6000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) > 50.0 - 0.1,
+                      f"stopband edge {f} Hz: {-20*np.log10(max(g,1e-300)):.2f} dB att")
+
+        if cid == "iir_cheby2_auto_bs":
+            n_ref, wn_ref = signal.cheb2ord([1500, 9000], [2500, 6000],
+                                            1, 50, fs=48000)
+            check(cid, abs(case["order"] - n_ref) <= TOL_ORD,
+                  f"auto order {case['order']} vs cheb2ord {n_ref}")
+            # the bandstop passband-edge optimization has an extremely
+            # flat valley; two independent optimizers land ~1e-5 relative
+            # apart with the SAME order and objective. Use a 5e-5
+            # relative tolerance (still catches structural mistakes),
+            # plus a hard spec-compliance check of the final design.
+            check(cid, abs(case["design_fc1"] - wn_ref[0])
+                  / wn_ref[0] < 5e-5,
+                  f"design fc1 {case['design_fc1']} vs {wn_ref[0]}")
+            check(cid, abs(case["design_fc2"] - wn_ref[1])
+                  / wn_ref[1] < 5e-5,
+                  f"design fc2 {case['design_fc2']} vs {wn_ref[1]}")
+            # spec compliance at the original edges
+            sos = np.array(case["sos"])
+            def _mag(f):
+                z = np.exp(-1j * 2 * np.pi * f / 48000)
+                return abs(np.prod([(s[0] + s[1]*z + s[2]*z*z) /
+                                    (1 + s[3]*z + s[4]*z*z) for s in sos]))
+            for f in (1500.0, 9000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) < 1.0 + 0.05,
+                      f"passband edge {f} Hz: {20*np.log10(g):.3f} dB")
+            for f in (2500.0, 6000.0):
+                g = _mag(f)
+                check(cid, -20 * np.log10(max(g, 1e-300)) > 50.0 - 0.1,
+                      f"stopband edge {f} Hz: {-20*np.log10(max(g,1e-300)):.2f} dB att")
+
         # fixed-point sanity checks
         if cid == "fir_lp_q15":
             h = np.array(case["coeffs"])

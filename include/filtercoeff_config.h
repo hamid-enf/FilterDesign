@@ -83,7 +83,10 @@ extern "C" {
 #define FCE_MAX_IIR_ORDER 32
 #endif
 
-/* Maximum number of SOS sections: (order+1)/2. */
+/* SOS sections per design: (order+1)/2 for LP/HP, but BP/BS double the
+ * prototype order and can reach `order` sections. The workspace layout
+ * always reserves `order` sections, so this constant is only a legacy
+ * hint kept for source compatibility (not an internal hard limit). */
 #ifndef FCE_MAX_SECTIONS
 #define FCE_MAX_SECTIONS ((FCE_MAX_IIR_ORDER + 1) / 2)
 #endif
@@ -105,6 +108,19 @@ extern "C" {
 /* Minimum pole-radius margin (1 - |p|) considered "safe". */
 #ifndef FCE_STABILITY_MARGIN_MIN
 #define FCE_STABILITY_MARGIN_MIN 1e-9
+#endif
+
+/*
+ * Tolerance band around the unit circle in the stability gate.
+ * Poles are measured from the SOS coefficients via the quadratic
+ * formula; for very high-Q designs (1 - |p| of order 1e-9 or less)
+ * that extraction carries a numerical noise floor of roughly 1e-8,
+ * which a perfectly stable scipy-equivalent design may straddle.
+ * Hard instability is only reported beyond 1 + tol (flagged
+ * UNSTABLE + SPEC_MARGINAL inside the band, no error).
+ */
+#ifndef FCE_STABILITY_RADIUS_TOL
+#define FCE_STABILITY_RADIUS_TOL 1e-7
 #endif
 
 /* Relative epsilon for conjugate-pair detection in zpk2sos. */

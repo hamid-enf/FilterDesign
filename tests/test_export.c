@@ -114,6 +114,77 @@ static void test_export_csv_json_report(void)
     TEST_ASSERT(strstr(buf, "Elliptic") != NULL);
 }
 
+/* Cheap structural JSON check: no dangling comma before a closing
+ * brace/bracket, balanced braces/brackets (values here never embed
+ * braces inside strings).  Regression: the IIR export used to emit
+ * "scale": 0,\n} for unquantized designs -- invalid JSON. */
+static int json_sane(const char* s)
+{
+    int braces = 0, brackets = 0;
+    const char* p;
+    for (p = s; *p; p++)
+    {
+        if (*p == ',')
+        {
+            const char* q = p + 1;
+            while (*q == ' ' || *q == '\n' || *q == '\t')
+                q++;
+            if (*q == '}' || *q == ']')
+                return 0;
+        }
+        else if (*p == '{') braces++;
+        else if (*p == '}') braces--;
+        else if (*p == '[') brackets++;
+        else if (*p == ']') brackets--;
+    }
+    return braces == 0 && brackets == 0;
+}
+
+static void test_export_json_wellformed(void)
+{
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+    char buf[32768];
+    fce_mem_writer_t mw;
+    fce_writer_t w;
+
+    /* IIR, no quantization: no section_scales array is emitted. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_BUTTERWORTH;
+    sp.iir_type = FCE_IIR_LOWPASS;
+    sp.fs = 48000; sp.fc1 = 5000; sp.order = 4;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    fce_writer_mem_init(&w, &mw, buf, sizeof(buf));
+    TEST_OK(fce_export_json(&r, &w));
+    TEST_ASSERT(strstr(buf, "\"scale\": 0") != NULL);
+    TEST_ASSERT(strstr(buf, "section_scales") == NULL);
+    TEST_ASSERT(json_sane(buf));
+
+    /* IIR with quantization: section_scales present, still well formed. */
+    sp.qformat = FCE_QFORMAT_Q31;
+    sp.scale_strategy = FCE_SCALE_SECTION_WISE;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    fce_writer_mem_init(&w, &mw, buf, sizeof(buf));
+    TEST_OK(fce_export_json(&r, &w));
+    TEST_ASSERT(strstr(buf, "section_scales") != NULL);
+    TEST_ASSERT(json_sane(buf));
+
+    /* FIR float32: well formed too. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_LOWPASS;
+    sp.fs = 48000; sp.fc1 = 5000; sp.num_taps = 33;
+    sp.window = FCE_WIN_HAMMING;
+    sp.precision = FCE_PRECISION_FLOAT32;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    fce_writer_mem_init(&w, &mw, buf, sizeof(buf));
+    TEST_OK(fce_export_json(&r, &w));
+    TEST_ASSERT(json_sane(buf));
+}
+
 static void test_export_float32(void)
 {
     fce_spec_t sp;
@@ -143,6 +214,7 @@ int main(void)
     test_export_c_fir();
     test_export_c_sos();
     test_export_csv_json_report();
+    test_export_json_wellformed();
     test_export_float32();
     printf("test_export: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;

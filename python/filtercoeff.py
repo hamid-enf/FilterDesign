@@ -27,7 +27,8 @@ API
     result = design(spec, details=True)
     # -> {"kind":..., "h":..., "sos":..., "num_taps":..., "order":...,
     #      "num_sections":..., "kaiser_beta":..., "norm_factor":...,
-    #      "symmetry":..., "design_fc1":..., "design_fc2":...}
+    #      "symmetry":..., "design_fc1":..., "design_fc2":...,
+    #      "order_clamped":... / "taps_clamped":...}  (auto-design limits hit)
 
     # Low-level helpers are exposed too: windows, prototypes, transforms,
     # so you can build custom pipelines exactly like the C library.
@@ -423,7 +424,7 @@ def kaiser_taps(atten_db, transition_hz, fs):
     if dw <= 0.0 or fs <= 0.0:
         return 0
     n = (a - 7.95) / (2.285 * dw) + 1.0
-    n = max(1.0, n)
+    n = max(3.0, n)  # N >= 2 required (windows divide by N-1); stay odd
     taps = int(math.ceil(n))
     if taps & 1 == 0:
         taps += 1
@@ -483,17 +484,16 @@ def _fir_ideal(fir_type, fs, fc1, fc2, N):
         if fir_type == "lowpass":
             v = (2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs)
         elif fir_type == "highpass":
-            v = -(2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs)
-            if m == 0.0:
-                v += 1.0
+            # delta - LP; the band-limited delta is sinc(m), which is
+            # nonzero at the half-integer m of even tap counts
+            v = sinc(m) - (2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs)
         elif fir_type == "bandpass":
             v = ((2.0 * fc2 / fs) * sinc(2.0 * fc2 * m / fs)
                  - (2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs))
         elif fir_type == "bandstop":
-            v = ((2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs)
-                 - (2.0 * fc2 / fs) * sinc(2.0 * fc2 * m / fs))
-            if m == 0.0:
-                v += 1.0
+            v = (sinc(m)
+                 - (2.0 * fc2 / fs) * sinc(2.0 * fc2 * m / fs)
+                 + (2.0 * fc1 / fs) * sinc(2.0 * fc1 * m / fs))
         elif fir_type == "hilbert":
             w1 = (2.0 * PI * fc1 / fs) if (fc1 > 0.0 and fc2 > fc1) else 0.0
             w2 = (2.0 * PI * fc2 / fs) if (fc1 > 0.0 and fc2 > fc1) else PI
@@ -527,7 +527,10 @@ def _fir_gain_at(h, w):
 
 
 def _fir_peak_in_band(h, fs, f_lo, f_hi):
-    grid = 256
+    # grid scales with N so one bracket stays below a ripple period
+    # (~fs/(N-1) Hz); golden-section needs a unimodal bracket
+    grid = max(256, 4 * len(h))
+    grid = min(grid, 4096)
     f_lo_c = 0.0 if f_lo <= 0.0 else f_lo
     f_hi_c = (0.5 * fs) if f_hi >= 0.5 * fs else f_hi
     if f_hi_c <= f_lo_c:
@@ -581,6 +584,30 @@ _FIR_TYPE_NORM = {
 }
 
 
+def _fir_passband(spec):
+    """Passband interval [f_lo, f_hi] for passband-peak normalization."""
+    fs = spec["fs"]
+    fc1 = spec["fc1"]
+    fc2 = spec.get("fc2", 0.0)
+    fir_type = spec["fir_type"]
+    if fir_type == "bandpass":
+        return fc1, fc2
+    if fir_type == "highpass":
+        return fc1, 0.5 * fs
+    if fir_type == "hilbert":
+        if fc1 > 0.0 and fc2 > fc1:
+            return fc1, fc2
+        return 0.0, 0.5 * fs
+    # LP / BS / differentiator: full band (BS passbands are outside
+    # [fc1, fc2]; scanning the stopband there was a bug)
+    return 0.0, 0.5 * fs
+
+
+def _norm_gain_bad(norm_gain, hmax):
+    return (not (norm_gain > 0.0)) or (not (norm_gain < 1e300)) or \
+           (not (norm_gain > 1e-12 * hmax))
+
+
 def fir_design(spec):
     """Port of fce_fir_design. Returns dict with h, internals, metadata."""
     fs = spec["fs"]
@@ -614,18 +641,22 @@ def fir_design(spec):
     elif norm == "nyquist":
         norm_gain = _fir_gain_at(h, PI)
     elif norm == "passband_peak":
-        if fir_type in ("bandpass", "bandstop"):
-            f_lo, f_hi = fc1, fc2
-        elif fir_type == "hilbert":
-            f_lo = fc1 if (fc1 > 0.0 and fc2 > fc1) else 0.0
-            f_hi = fc2 if (fc1 > 0.0 and fc2 > fc1) else 0.5 * fs
-        else:
-            f_lo, f_hi = 0.0, 0.5 * fs
+        f_lo, f_hi = _fir_passband(spec)
         norm_gain = _fir_peak_in_band(h, fs, f_lo, f_hi)
     else:  # "none"
         norm_gain = 1.0
 
-    if not (norm_gain > 0.0) or not (norm_gain < 1e300):
+    # degenerate reference (a symmetry null on the AUTO reference edge):
+    # AUTO falls back to the passband peak; an explicit degenerate
+    # request is an error. (mirrors fce_fir_design)
+    hmax = max(abs(hn) for hn in h)
+    if (_norm_gain_bad(norm_gain, hmax)
+            and spec.get("normalization", "auto") == "auto"
+            and norm != "passband_peak"):
+        norm = "passband_peak"
+        f_lo, f_hi = _fir_passband(spec)
+        norm_gain = _fir_peak_in_band(h, fs, f_lo, f_hi)
+    if _norm_gain_bad(norm_gain, hmax):
         raise ValueError("numerical error in normalization")
     h = [hn / norm_gain for hn in h]
 
@@ -633,16 +664,14 @@ def fir_design(spec):
     if precision == "float32":
         h = [float(x) for x in h]
 
+    # anti-symmetric responses follow tap parity exactly like C:
+    # odd taps -> Type III, even taps -> Type IV
     if N & 1:
         sym = "I" if fir_type in ("lowpass", "highpass", "bandpass",
                                   "bandstop") else "III"
     else:
         sym = "II" if fir_type in ("lowpass", "highpass", "bandpass",
                                    "bandstop") else "IV"
-    if fir_type == "hilbert":
-        sym = "III"
-    elif fir_type == "differentiator":
-        sym = "IV"
 
     return {"kind": "fir",
             "h": h,
@@ -1031,7 +1060,9 @@ def zpk2sos(z, p, k):
         npad += 1
         nzpad += 1
     ns = (npad + 1) // 2
-    if ns > MAX_SECTIONS:
+    # BP/BS double the prototype order, so ns can reach `order` itself
+    # (the old cap at (order+1)//2 wrongly rejected BP/BS orders > 16)
+    if ns > MAX_IIR_ORDER:
         raise ValueError("too many sections")
 
     up = [0] * npad
@@ -1128,6 +1159,107 @@ def _acosh(x):
     return math.log(x + math.sqrt(x * x - 1.0))
 
 
+def _bs_obj(wp, ind, passb0, passb1, stopb0, stopb1, gpass, gstop,
+            iir_family):
+    """scipy band_stop_obj: fractional bandstop order as one passband
+    edge is moved (the other stays fixed)."""
+    p0 = wp if ind == 0 else passb0
+    p1 = wp if ind == 1 else passb1
+    n1 = abs(stopb0 * (p0 - p1) / (stopb0 * stopb0 - p0 * p1))
+    n2 = abs(stopb1 * (p0 - p1) / (stopb1 * stopb1 - p0 * p1))
+    nat = min(n1, n2)
+    if iir_family == "butterworth":
+        return (math.log10((gstop - 1.0) / (gpass - 1.0))
+                / (2.0 * math.log10(nat)))
+    if iir_family == "elliptic":
+        arg1_sq = (gpass - 1.0) / (gstop - 1.0)
+        arg0 = 1.0 / nat
+        d00 = ellipk(arg0 * arg0)
+        d01 = ellipkm1(arg0 * arg0)
+        d10 = ellipk(arg1_sq)
+        d11 = ellipkm1(arg1_sq)
+        return d00 * d11 / (d01 * d10)
+    # cheby 1 & 2
+    return (_acosh(math.sqrt((gstop - 1.0) / (gpass - 1.0)))
+            / _acosh(nat))
+
+
+def _bs_fminbound(ind, x1, x2, passb0, passb1, stopb0, stopb1,
+                  gpass, gstop, iir_family):
+    """Bounded Brent minimization; 1:1 port of scipy
+    _minimize_scalar_bounded (xatol=1e-5, maxfun=500)."""
+    sqrt_eps = 1.4901161193847656e-08      # sqrt(2.2e-16)
+    golden_mean = 0.38196601125010510      # 0.5*(3-sqrt(5))
+    xatol = 1e-5
+    a, b = x1, x2
+
+    def f(x):
+        return _bs_obj(x, ind, passb0, passb1, stopb0, stopb1,
+                       gpass, gstop, iir_family)
+
+    fulc = nfc = xf = a + golden_mean * (b - a)
+    fx = f(xf)
+    ffulc = fnfc = fx
+    rat = e = 0.0
+    xm = 0.5 * (a + b)
+    tol1 = sqrt_eps * abs(xf) + xatol / 3.0
+    tol2 = 2.0 * tol1
+    num = 1
+    while abs(xf - xm) > (tol2 - 0.5 * (b - a)):
+        golden = True
+        if abs(e) > tol1:
+            golden = False
+            r = (xf - nfc) * (fx - ffulc)
+            q = (xf - fulc) * (fx - fnfc)
+            p = (xf - fulc) * q - (xf - nfc) * r
+            q = 2.0 * (q - r)
+            if q > 0.0:
+                p = -p
+            q = abs(q)
+            r = e
+            e = rat
+            if (abs(p) < abs(0.5 * q * r)) and (p > q * (a - xf)) \
+                    and (p < q * (b - xf)):
+                rat = p / q
+                x = xf + rat
+                if (x - a) < tol2 or (b - x) < tol2:
+                    si = 1.0 if xm >= xf else -1.0
+                    rat = tol1 * si
+            else:
+                golden = True
+        if golden:
+            e = (a - xf) if xf >= xm else (b - xf)
+            rat = golden_mean * e
+        si = (1.0 if rat > 0.0 else (-1.0 if rat < 0.0 else 1.0))
+        x = xf + si * max(abs(rat), tol1)
+        fu = f(x)
+        num += 1
+        if num >= 500:
+            break
+        if fu <= fx:
+            if x >= xf:
+                a = xf
+            else:
+                b = xf
+            fulc, ffulc = nfc, fnfc
+            nfc, fnfc = xf, fx
+            xf, fx = x, fu
+        else:
+            if x < xf:
+                a = x
+            else:
+                b = x
+            if (fu <= fnfc) or (nfc == xf):
+                fulc, ffulc = nfc, fnfc
+                nfc, fnfc = x, fu
+            elif (fu <= ffulc) or (fulc == xf) or (fulc == nfc):
+                fulc, ffulc = x, fu
+        xm = 0.5 * (a + b)
+        tol1 = sqrt_eps * abs(xf) + xatol / 3.0
+        tol2 = 2.0 * tol1
+    return xf
+
+
 def iir_auto_order(spec):
     """Returns dict(order, design_fc1, design_fc2). Raises ValueError."""
     fs = spec["fs"]
@@ -1182,6 +1314,17 @@ def iir_auto_order(spec):
         passb2 = _prewarp(wp2, fs)
         stopb1 = _prewarp(ws1, fs)
         stopb2 = _prewarp(ws2, fs)
+        # scipy _find_nat_freq: each passband edge is optimized so the
+        # fractional order is minimal (mirrors band_stop_obj/fminbound)
+        gp = 10.0 ** (0.1 * gpass_db)
+        gs = 10.0 ** (0.1 * gstop_db)
+        opt0 = _bs_fminbound(0, passb1, stopb1 - 1e-12,
+                             passb1, passb2, stopb1, stopb2,
+                             gp, gs, iir_family)
+        opt1 = _bs_fminbound(1, stopb2 + 1e-12, passb2,
+                             passb1, passb2, stopb1, stopb2,
+                             gp, gs, iir_family)
+        passb1, passb2 = opt0, opt1
         n1 = abs((stopb1 * (passb1 - passb2)) /
                  (stopb1 * stopb1 - passb1 * passb2))
         n2 = abs((stopb2 * (passb1 - passb2)) /
@@ -1217,8 +1360,10 @@ def iir_auto_order(spec):
 
     if n < 1:
         raise ValueError("bad order")
+    clamped = 0
     if n > MAX_AUTO_ORDER:
         n = MAX_AUTO_ORDER
+        clamped = 1  # surfaced like the C FCE_FLAG_ORDER_CLAMPED
 
     w0 = 1.0
     if iir_family == "butterworth":
@@ -1250,19 +1395,29 @@ def iir_auto_order(spec):
             design_fc1 = fs * math.atan(wn_lo / (2.0 * fs)) / PI
             design_fc2 = fs * math.atan(wn_hi / (2.0 * fs)) / PI
     elif iir_type == "bandstop":
-        bw = passb2 - passb1
-        w0b = 1.0 if iir_family == "chebyshev2" else w0
-        discr = math.sqrt(bw * bw + 4.0 * w0b * w0b * passb1 * passb2)
-        wn_hi = (bw + discr) / (2.0 * w0b)
-        wn_lo = (discr - bw) / (2.0 * w0b)
         if iir_family == "chebyshev2":
-            design_fc1 = spec["fc1"]
-            design_fc2 = spec["fc2"]
+            # cheb2ord filter_type=3: -gpass frequency via new_freq
+            v = _acosh(math.sqrt((gstop - 1.0) / (gpass - 1.0)))
+            new_freq = 1.0 / math.cosh(v / float(n))
+            nat0 = (new_freq * 0.5 * (passb1 - passb2)
+                    + math.sqrt(new_freq * new_freq * (passb2 - passb1)
+                                * (passb2 - passb1) * 0.25
+                                + passb1 * passb2))
+            nat1 = passb1 * passb2 / nat0
+            lo, hi = min(nat0, nat1), max(nat0, nat1)
+            design_fc1 = fs * math.atan(lo / (2.0 * fs)) / PI
+            design_fc2 = fs * math.atan(hi / (2.0 * fs)) / PI
         else:
+            # butter: discr formula; cheb1/ellip: the optimized edges
+            bw = passb2 - passb1
+            discr = math.sqrt(bw * bw + 4.0 * w0 * w0 * passb1 * passb2)
+            wn_hi = (bw + discr) / (2.0 * w0)
+            wn_lo = (discr - bw) / (2.0 * w0)
             design_fc1 = fs * math.atan(wn_lo / (2.0 * fs)) / PI
             design_fc2 = fs * math.atan(wn_hi / (2.0 * fs)) / PI
 
-    return {"order": n, "design_fc1": design_fc1, "design_fc2": design_fc2}
+    return {"order": n, "design_fc1": design_fc1, "design_fc2": design_fc2,
+            "clamped": clamped}
 
 
 def iir_design(spec):
@@ -1487,6 +1642,7 @@ def design(spec, details=False):
 
     if kind == "fir":
         num_taps = s.get("num_taps", 0)
+        taps_clamped = False
         if num_taps == 0:
             if s.get("window") != "kaiser" or not s.get("stopband_atten_db", 0) > 0 \
                     or not s.get("transition_hz", 0) > 0:
@@ -1494,17 +1650,21 @@ def design(spec, details=False):
             num_taps = kaiser_taps(s["stopband_atten_db"], s["transition_hz"], fs)
             if num_taps > MAX_FIR_TAPS:
                 num_taps = MAX_FIR_TAPS
+                taps_clamped = True
         s["num_taps"] = num_taps
         res = fir_design(s)
+        res["taps_clamped"] = taps_clamped
         if details:
             return res
         return res["h"]
 
     else:  # iir
         order = s.get("order", 0)
+        clamped = 0
         if order == 0:
             auto = iir_auto_order(s)
             order = auto["order"]
+            clamped = auto.get("clamped", 0)
             s["design_fc1"] = auto["design_fc1"]
             s["design_fc2"] = auto["design_fc2"]
         else:
@@ -1514,6 +1674,7 @@ def design(spec, details=False):
                 s["design_fc2"] = s["fc2"]
         s["order"] = order
         res = iir_design(s)
+        res["order_clamped"] = bool(clamped)
         if details:
             return res
         flat = [v for sec in res["sos"] for v in sec]

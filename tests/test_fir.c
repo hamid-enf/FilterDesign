@@ -204,6 +204,114 @@ static void test_fir_known_coefficients(void)
     TEST_NEAR(r.h_f64[2], 0.28004957675577868, 1e-14);
 }
 
+static void test_antisymmetric_parity(void)
+{
+    /* anti-symmetric responses: odd taps -> Type III, even -> Type IV
+     * (it used to be hardcoded III for Hilbert / IV for differentiator) */
+    fce_spec_t sp;
+    fce_result_t r;
+
+    fce_spec_fir(&sp, FCE_FIR_HILBERT, 48000, 0, 0, 100,
+                 FCE_WIN_HAMMING, 0.0, FCE_PRECISION_FLOAT64);
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.symmetry == FCE_SYMMETRY_IV);
+
+    fce_spec_fir(&sp, FCE_FIR_DIFFERENTIATOR, 48000, 0, 0, 51,
+                 FCE_WIN_HAMMING, 0.0, FCE_PRECISION_FLOAT64);
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.symmetry == FCE_SYMMETRY_III);
+}
+
+/* |H(f)| of the designed FIR (unquantized float64 coefficients). */
+static double fir_gain_at(const fce_result_t* r, double f)
+{
+    double re = 0.0, im = 0.0;
+    uint32_t i;
+    for (i = 0; i < r->num_taps; i++)
+    {
+        double ph = -2.0 * FCE_PI * f * (double)i / 48000.0;
+        re += r->h_f64[i] * cos(ph);
+        im += r->h_f64[i] * sin(ph);
+    }
+    return sqrt(re * re + im * im);
+}
+
+static void test_even_tap_hp_bs(void)
+{
+    fce_spec_t sp;
+    fce_result_t r;
+    uint32_t i;
+    double f, peak = 0.0;
+
+    /* Regression: an even-tap highpass must be a true highpass.  The
+     * band-limited delta (sinc(m), equal to 1 at m=0) used to be added
+     * only when m == 0.0 exactly, which never happens for even lengths
+     * (half-integer m) -- the result was a negated LOWPASS with
+     * H(0) ~= 1 instead of ~= 0. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_HIGHPASS;
+    sp.fs = 48000; sp.fc1 = 12000; sp.num_taps = 64;
+    sp.window = FCE_WIN_HAMMING;
+    sp.normalization = FCE_NORM_NONE;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.num_taps == 64u);
+    TEST_ASSERT(r.symmetry == FCE_SYMMETRY_II);
+    TEST_ASSERT(fir_gain_at(&r, 0.0) < 1e-3);          /* blocks DC        */
+    TEST_NEAR(fir_gain_at(&r, 12000.0), 0.5, 0.05);    /* -6 dB at cutoff  */
+    TEST_NEAR(fir_gain_at(&r, 0.40 * 48000.0), 1.0, 0.05); /* passband     */
+    TEST_ASSERT(r.flags & FCE_FLAG_SYMMETRY_WARNING);  /* Type II null     */
+    for (i = 0; i < 64; i++)
+        TEST_NEAR(r.h_f64[i], r.h_f64[63u - i], 1e-14);
+
+    /* AUTO normalization must not divide by the Type-II Nyquist null;
+     * it falls back to the passband peak and warns. */
+    sp.normalization = FCE_NORM_AUTO;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.flags & FCE_FLAG_SYMMETRY_WARNING);
+    TEST_ASSERT(r.normalization == FCE_NORM_PASSBAND_PEAK);
+    for (f = 0.26 * 48000.0; f < 0.495 * 48000.0; f += 200.0)
+    {
+        double g = fir_gain_at(&r, f);
+        if (g > peak)
+            peak = g;
+    }
+    TEST_NEAR(peak, 1.0, 0.02); /* passband peak normalized to unity */
+
+    /* Regression: an even-tap bandstop must pass DC (~1), not block it. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 6000; sp.fc2 = 18000; sp.num_taps = 64;
+    sp.window = FCE_WIN_HAMMING;
+    sp.normalization = FCE_NORM_NONE;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_NEAR(fir_gain_at(&r, 0.0), 1.0, 0.02);        /* passes DC        */
+    TEST_ASSERT(fir_gain_at(&r, 12000.0) < 0.01);      /* stopband dip     */
+    TEST_NEAR(fir_gain_at(&r, 0.45 * 48000.0), 1.0, 0.05); /* upper pass   */
+}
+
+static void test_kaiser_auto_min_taps(void)
+{
+    /* a very relaxed attenuation spec used to collapse to N = 1 tap,
+     * which made the window math divide by (N-1) = 0 and fail with a
+     * numerical error; the estimate must clamp to a valid odd N >= 3 */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_LOWPASS;
+    sp.fs = 48000; sp.fc1 = 5000; sp.num_taps = 0; /* auto */
+    sp.window = FCE_WIN_KAISER;
+    sp.stopband_atten_db = 1.0; sp.transition_hz = 8000;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.num_taps >= 3u);
+    TEST_ASSERT((r.num_taps & 1u) == 1u);
+}
+
 int main(void)
 {
     test_lowpass_basics();
@@ -213,6 +321,9 @@ int main(void)
     test_hilbert_differentiator();
     test_symmetry_warning();
     test_fir_known_coefficients();
+    test_antisymmetric_parity();
+    test_even_tap_hp_bs();
+    test_kaiser_auto_min_taps();
     printf("test_fir: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;
 }

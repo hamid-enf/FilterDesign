@@ -59,7 +59,7 @@ typedef enum fce_status
     FCE_ERR_UNSTABLE,              /* designed filter is unstable            */
     FCE_ERR_OVERFLOW,              /* coefficient overflow (fixed point)     */
     FCE_ERR_QUANTIZATION,          /* quantization produced unusable result  */
-    FCE_ERR_BUFFER_TOO_SMALL,      /* caller workspace/export buffer too big */
+    FCE_ERR_BUFFER_TOO_SMALL,      /* caller workspace/export buffer too small */
     FCE_ERR_NOT_AVAILABLE          /* requested data was not produced        */
 } fce_status_t;
 
@@ -438,7 +438,9 @@ typedef bool (*fce_response_cb)(void* ctx, const fce_response_point_t* pt);
 /*
  * Scan the frequency response of an FIR filter (h, n taps) or an IIR SOS
  * filter (sos, 5 coefficients per section) on a grid of n_points points
- * from f_start to f_stop [Hz].
+ * from f_start to f_stop [Hz]. f_stop == f_start probes that single
+ * frequency; an inverted range (f_stop < f_start) means the full band
+ * [0, fs/2].
  */
 fce_status_t fce_response_fir(const double* h, uint16_t n,
                               double fs, uint32_t n_points,
@@ -502,7 +504,7 @@ typedef enum fce_sim_signal
  *   MULTITONE:     a = f1 [Hz],               b = f2 [Hz]  (three unity tones: f1, f2, 2*f1+f2)
  *   IMPULSE:       a = sample index of impulse, b = amplitude
  *   STEP:          a = step start sample,     b = amplitude
- *   WHITE_NOISE:   a = seed,                  b = amplitude (uniform [-b, b])
+ *   WHITE_NOISE:   a = seed (0 = default seed), b = amplitude (uniform [-b, b])
  *   CHIRP:         a = f_start [Hz],          b = f_stop [Hz]
  *   DC_PLUS_NOISE: a = DC level,              b = noise amplitude
  */
