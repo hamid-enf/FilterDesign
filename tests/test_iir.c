@@ -311,6 +311,125 @@ static void test_high_order(void)
     TEST_ASSERT(r.max_pole_radius < 1.0);
 }
 
+static void test_bandpass_bandstop_high_order_sections(void)
+{
+    /* BP/BS double the prototype order, so sections can reach `order`
+     * itself (not (order+1)/2). Orders 17..32 must not be rejected. */
+    fce_spec_t sp;
+    fce_result_t r;
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_BUTTERWORTH;
+    sp.iir_type = FCE_IIR_BANDPASS;
+    sp.fs = 48000; sp.fc1 = 1000; sp.fc2 = 5000; sp.order = 18;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.num_sections == 18u);
+    TEST_ASSERT(r.max_pole_radius < 1.0);
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV1;
+    sp.iir_type = FCE_IIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 2000; sp.fc2 = 4000; sp.order = 20;
+    sp.passband_ripple_db = 0.5;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.num_sections == 20u);
+    TEST_ASSERT(r.max_pole_radius < 1.0);
+}
+
+static void test_auto_order_clamped_flag(void)
+{
+    /* such a tight spec that buttord needs far more than
+     * FCE_MAX_AUTO_ORDER (24): order must be clamped AND reported */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_BUTTERWORTH;
+    sp.iir_type = FCE_IIR_LOWPASS;
+    sp.fs = 48000; sp.fc1 = 2000; sp.edge1_hz = 2100;
+    sp.passband_ripple_db = 0.1; sp.stopband_atten_db = 160;
+    sp.order = 0; /* auto */
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.order == 24u /* FCE_MAX_AUTO_ORDER */);
+    TEST_ASSERT((r.flags & FCE_FLAG_ORDER_CLAMPED) != 0u);
+}
+
+static double sos_mag_at(const fce_result_t* r, double fs, double f)
+{
+    double w = 2.0 * FCE_PI * f / fs;
+    double cw = cos(w), sw = sin(w);
+    double c2w = cos(2.0 * w), s2w = sin(2.0 * w);
+    double g = 1.0;
+    uint32_t s;
+    for (s = 0; s < r->num_sections; s++)
+    {
+        double br = r->sos_f64[5*s] + r->sos_f64[5*s+1] * cw +
+                    r->sos_f64[5*s+2] * c2w;
+        double bi = -(r->sos_f64[5*s+1] * sw + r->sos_f64[5*s+2] * s2w);
+        double ar = 1.0 + r->sos_f64[5*s+3] * cw + r->sos_f64[5*s+4] * c2w;
+        double ai = -(r->sos_f64[5*s+3] * sw + r->sos_f64[5*s+4] * s2w);
+        g *= sqrt(br * br + bi * bi) / sqrt(ar * ar + ai * ai);
+    }
+    return g;
+}
+
+static void test_auto_order_bandstop(void)
+{
+    /* bandstop auto-order must follow scipy's optimized-passband rule
+     * (band_stop_obj / _find_nat_freq): classic min(n1,n2) over-estimates
+     * the order. Reference: buttord/cheb2ord/ellipord on these specs. */
+    fce_spec_t sp;
+    fce_result_t r;
+
+    /* butter: buttord([1500,9000],[2500,6000],1,50,fs=48k) -> 8 */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_BUTTERWORTH;
+    sp.iir_type = FCE_IIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 2500; sp.fc2 = 6000; sp.order = 0;
+    sp.edge1_hz = 1500; sp.edge2_hz = 9000;
+    sp.passband_ripple_db = 1.0; sp.stopband_atten_db = 50;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.order == 8u);
+    /* spec compliance at the edges */
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 1500)) < 1.05);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 9000)) < 1.05);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 2500)) > 49.9);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 6000)) > 49.9);
+
+    /* cheby2: cheb2ord(same) -> 5 */
+    sp.iir_family = FCE_IIR_CHEBYSHEV2;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.order == 5u);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 2500)) > 49.9);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 6000)) > 49.9);
+
+    /* cheby1: cheb1ord(same) -> 5, design frequencies = optimized
+     * passband edges */
+    sp.iir_family = FCE_IIR_CHEBYSHEV1;
+    TEST_OK(design(&sp, &r));
+    TEST_ASSERT(r.order == 5u);
+    TEST_ASSERT(-20.0 * log10(sos_mag_at(&r, 48000, 2500)) > 49.9);
+
+    /* auto-order spec validation: stopband edges outside (0, fs/2)
+     * must be rejected as INVALID_SPEC, not fail numerically later */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV2;
+    sp.iir_type = FCE_IIR_BANDPASS;
+    sp.fs = 48000; sp.fc1 = 3000; sp.fc2 = 6000; sp.order = 0;
+    sp.edge1_hz = 2000; sp.edge2_hz = 25000; /* above Nyquist */
+    sp.passband_ripple_db = 1.0; sp.stopband_atten_db = 60;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_ASSERT(design(&sp, &r) == FCE_ERR_INVALID_SPEC);
+}
+
 int main(void)
 {
     test_butter_lp2_closed_form();
@@ -318,10 +437,13 @@ int main(void)
     test_bessel_known_poles();
     test_auto_order_butter();
     test_auto_order_ellip();
+    test_auto_order_bandstop();
     test_iir_known_highpass();
     test_sos_sign_convention();
     test_sos_ordering();
     test_high_order();
+    test_bandpass_bandstop_high_order_sections();
+    test_auto_order_clamped_flag();
     printf("test_iir: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;
 }

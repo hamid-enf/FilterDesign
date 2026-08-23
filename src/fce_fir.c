@@ -100,9 +100,12 @@ static void fce_fir_ideal(fce_fir_type_t type,
             break;
 
         case FCE_FIR_HIGHPASS:
-            v = -(2.0 * fc1 / fs) * fce_sinc(2.0 * fc1 * m / fs);
-            if (m == 0.0)
-                v += 1.0;
+            /* delta - LP. The band-limited delta is sinc(m) (= sin(pi m)/(pi m)),
+             * NOT "1 at m == 0 only": for even N the samples sit at
+             * half-integer m, where sinc(m) != 0. Writing the delta as
+             * `if (m == 0) v += 1` silently drops it for all even tap
+             * counts and turns the highpass into a negated lowpass. */
+            v = fce_sinc(m) - (2.0 * fc1 / fs) * fce_sinc(2.0 * fc1 * m / fs);
             break;
 
         case FCE_FIR_BANDPASS:
@@ -111,10 +114,10 @@ static void fce_fir_ideal(fce_fir_type_t type,
             break;
 
         case FCE_FIR_BANDSTOP:
-            v = (2.0 * fc1 / fs) * fce_sinc(2.0 * fc1 * m / fs)
-              - (2.0 * fc2 / fs) * fce_sinc(2.0 * fc2 * m / fs);
-            if (m == 0.0)
-                v += 1.0;
+            /* delta - BP: same sinc(m) band-limited delta as the HP above */
+            v = fce_sinc(m)
+              - (2.0 * fc2 / fs) * fce_sinc(2.0 * fc2 * m / fs)
+              + (2.0 * fc1 / fs) * fce_sinc(2.0 * fc1 * m / fs);
             break;
 
         case FCE_FIR_HILBERT:
@@ -177,9 +180,19 @@ static double fce_fir_peak_in_band(const double* h, uint32_t N,
 {
     double best = 0.0;
     uint32_t i;
-    uint32_t grid = 256u;
+    /* The golden-section refinement assumes a unimodal bracket. The
+     * response ripples with period ~ fs / (N-1) Hz, so a fixed sparse
+     * grid can put several ripple peaks into one bracket and the
+     * refinement then lands on an arbitrary sub-peak (observed peak
+     * estimate error ~5e-5 for N ~ 100). Scale the grid with the tap
+     * count so one bracket always spans less than a ripple period. */
+    uint32_t grid = 4u * N;
     double f_lo_c = (f_lo <= 0.0) ? 0.0 : f_lo;
     double f_hi_c = (f_hi >= 0.5 * fs) ? 0.5 * fs : f_hi;
+    if (grid < 256u)
+        grid = 256u;
+    if (grid > 4096u)
+        grid = 4096u;
     if (f_hi_c <= f_lo_c)
         f_hi_c = 0.5 * fs;
 
@@ -234,6 +247,48 @@ static double fce_fir_peak_in_band(const double* h, uint32_t N,
         best = 0.5 * (fc + fd);
     }
     return best;
+}
+
+/* passband interval [f_lo, f_hi] used for passband-peak normalization */
+static void fce_fir_passband(const fce_spec_t* sp, double* f_lo, double* f_hi)
+{
+    switch (sp->fir_type)
+    {
+    case FCE_FIR_BANDPASS:
+        *f_lo = sp->fc1;
+        *f_hi = sp->fc2;
+        break;
+    case FCE_FIR_HIGHPASS:
+        *f_lo = sp->fc1;
+        *f_hi = 0.5 * sp->fs;
+        break;
+    case FCE_FIR_HILBERT:
+        if (sp->fc1 > 0.0 && sp->fc2 > sp->fc1)
+        {
+            *f_lo = sp->fc1;
+            *f_hi = sp->fc2;
+        }
+        else
+        {
+            *f_lo = 0.0;
+            *f_hi = 0.5 * sp->fs;
+        }
+        break;
+    default:
+        /* LP / BS / differentiator: scan the full band. For BS the old
+         * code scanned [fc1, fc2] which is the STOP band - normalizing
+         * the stopband peak to 1 amplified the taps into nonsense. */
+        *f_lo = 0.0;
+        *f_hi = 0.5 * sp->fs;
+        break;
+    }
+}
+
+/* is a normalization reference gain usable, relative to the tap scale? */
+static int fce_norm_gain_ok(double norm_gain, double hmax)
+{
+    return (norm_gain > 0.0) && (norm_gain < 1e300) &&
+           (norm_gain > 1e-12 * hmax);
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,19 +357,7 @@ fce_status_t fce_fir_design(const fce_spec_t* sp, fce_result_t* r,
     case FCE_NORM_PASSBAND_PEAK:
     {
         double f_lo, f_hi;
-        switch (sp->fir_type)
-        {
-        case FCE_FIR_BANDPASS:
-        case FCE_FIR_BANDSTOP:
-            f_lo = sp->fc1; f_hi = sp->fc2; break;
-        case FCE_FIR_HILBERT:
-            f_lo = (sp->fc1 > 0.0 && sp->fc2 > sp->fc1) ? sp->fc1 : 0.0;
-            f_hi = (sp->fc1 > 0.0 && sp->fc2 > sp->fc1) ? sp->fc2
-                                                        : 0.5 * sp->fs;
-            break;
-        default:
-            f_lo = 0.0; f_hi = 0.5 * sp->fs; break;
-        }
+        fce_fir_passband(sp, &f_lo, &f_hi);
         norm_gain = fce_fir_peak_in_band(h, N, sp->fs, f_lo, f_hi);
         break;
     }
@@ -326,8 +369,44 @@ fce_status_t fce_fir_design(const fce_spec_t* sp, fce_result_t* r,
         break;
     }
 
-    if (!(norm_gain > 0.0) || !(norm_gain < 1e300))
-        return FCE_ERR_NUMERICAL;
+    /* guard degenerate normalization references: a Nyquist/DC edge
+     * normalization on a filter with (numerically) zero gain at that
+     * edge would otherwise silently amplify the taps by ~1e16.
+     *
+     * When this happens with FCE_NORM_AUTO it is a symmetry-type null
+     * landing exactly on the AUTO reference (an even-tap highpass always
+     * has a Nyquist null, an odd-tap differentiator always has one too).
+     * AUTO then falls back to the passband peak, which is well defined
+     * for every symmetry type, and raises FCE_FLAG_SYMMETRY_WARNING.
+     * An explicitly requested degenerate reference is a spec error and
+     * still returns FCE_ERR_NUMERICAL. */
+    {
+        double hmax = 0.0;
+        for (n = 0; n < N; n++)
+        {
+            double a = fabs(h[n]);
+            if (a > hmax)
+                hmax = a;
+        }
+        if (!fce_norm_gain_ok(norm_gain, hmax) &&
+            sp->normalization == FCE_NORM_AUTO &&
+            norm != FCE_NORM_PASSBAND_PEAK)
+        {
+            double f_lo, f_hi;
+            norm = FCE_NORM_PASSBAND_PEAK;
+            fce_fir_passband(sp, &f_lo, &f_hi);
+            norm_gain = fce_fir_peak_in_band(h, N, sp->fs, f_lo, f_hi);
+            r->flags |= FCE_FLAG_SYMMETRY_WARNING;
+        }
+        if (!fce_norm_gain_ok(norm_gain, hmax))
+            return FCE_ERR_NUMERICAL;
+
+        /* amplification beyond ~1e8x (an explicitly requested reference
+         * in a deep stopband) is honored but flagged: the gain is nearly
+         * all numerical noise at that point */
+        if (!(norm_gain > 1e-8 * hmax))
+            r->flags |= FCE_FLAG_NUMERICAL_WARNING;
+    }
 
     for (n = 0; n < N; n++)
         h[n] /= norm_gain;
@@ -361,10 +440,9 @@ fce_status_t fce_fir_design(const fce_spec_t* sp, fce_result_t* r,
             r->flags |= FCE_FLAG_SYMMETRY_WARNING; /* Type II has a Nyquist null */
         break;
     case FCE_FIR_HILBERT:
-        r->symmetry = FCE_SYMMETRY_III;
-        break;
     case FCE_FIR_DIFFERENTIATOR:
-        r->symmetry = FCE_SYMMETRY_IV;
+        /* both are anti-symmetric: Type III (odd taps) or Type IV (even) */
+        r->symmetry = (N & 1u) ? FCE_SYMMETRY_III : FCE_SYMMETRY_IV;
         break;
     default:
         r->symmetry = FCE_SYMMETRY_NONE;

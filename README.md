@@ -52,7 +52,7 @@ if (fce_generate(&spec, &result, &ws) == FCE_OK)
 make            # ساخت libfiltercoeff.a
 make test       # اجرای ۵۹۰۰+ تست واحد
 make ref        # مقایسه با SciPy (نیازمند python3 + scipy)
-make examples   # ساخت ۱۰ مثال
+make examples   # ساخت ۲۰ مثال
 make bench      # بنچمارک زمان طراحی
 make pycheck    # بررسی پورت پایتون در برابر C (فقط python3، بدون scipy)
 ```
@@ -65,7 +65,7 @@ make pycheck    # بررسی پورت پایتون در برابر C (فقط pyt
 FilterCoeff/
 ├── include/          ← فایل‌های سرآیند عمومی (filtercoeff.h)
 ├── src/              ← پیاده‌سازی (C99، بدون تخصیص پویا)
-├── examples/         ← ۱۰ مثال کامل (مثلاً `./examples/example_01_fir_lowpass`)
+├── examples/         ← ۲۰ مثال کامل (مثلاً `./examples/example_01_fir_lowpass`)
 ├── tests/            ← تست‌های واحد (بیش از ۵۹۰۰ بررسی)
 ├── bench/            ← بنچمارک زمان طراحی
 ├── tools/reference/  ← ابزار مقایسه با SciPy
@@ -100,7 +100,7 @@ FilterCoeff/
 | [فصل ۱۹](docs/19_python_matlab_ports.md) | پورت‌های Python و MATLAB + ارزیابی دقت |
 | [پژوهش فنی](docs/ALGORITHM_REFERENCES.md) | منابع و فرمول‌های الگوریتم‌ها |
 | [اعتبارسنجی مرجع](docs/reference_validation.md) | روش مقایسه با SciPy |
-| CI | فایل `ci/ci.yml` — برای فعال‌سازی به `.github/workflows/` کپی کنید |
+| CI | فایل `.github/workflows/ci.yml` (کپیٔ مرجع: `ci/ci.yml`) |
 | Adapter | `include/filtercoeff_adapter.h` — تبدیل به فرمت scipy/MATLAB/CMSIS |
 
 ## ویژگی‌ها

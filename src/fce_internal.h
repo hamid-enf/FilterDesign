@@ -207,7 +207,7 @@ double fce_biquad_peak_gain(const double* c, uint32_t grid);
 /* poles of z^2 + a1*z + a2 (our convention) */
 void fce_biquad_poles(double a1, double a2, fce_cplx_t* p1, fce_cplx_t* p2);
 
-/* finite-difference group delay (samples) of a biquad at w */
+/* analytic group delay (samples) of a biquad at w: gd_a - gd_b */
 double fce_biquad_group_delay(const double* c, double w);
 
 /* band scans (validation internals, shared with fce_generate) */
@@ -230,6 +230,7 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
 typedef struct fce_auto
 {
     uint32_t order;
+    int      clamped;   /* 1 when the order was clamped to FCE_MAX_AUTO_ORDER */
     double design_fc1; /* Hz (LP/HP: cutoff; BP/BS: band edges) */
     double design_fc2;
 } fce_auto_t;

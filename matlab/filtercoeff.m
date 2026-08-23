@@ -59,9 +59,11 @@ function [coeffs, info] = filtercoeff(spec)
         info.kind = 'fir';
     else
         order = s.order;
+        clamped = 0;
         if order == 0
             a = fce_iir_auto_order(s);
             order = a.order;
+            clamped = a.clamped;
             s.design_fc1 = a.design_fc1;
             s.design_fc2 = a.design_fc2;
         else
@@ -81,6 +83,7 @@ function [coeffs, info] = filtercoeff(spec)
         end
         info = r;
         info.kind = 'iir';
+        info.order_clamped = clamped;
     end
 end
 
@@ -421,7 +424,7 @@ function taps = fce_kaiser_taps(att, trans, fs)
     a = abs(att);
     dw = 2 * pi * trans / fs;
     n = (a - 7.95) / (2.285 * dw) + 1;
-    if n < 1, n = 1; end
+    if n < 3, n = 3; end  % windows divide by N-1; keep the minimum odd size
     taps = ceil(n);
     if mod(taps, 2) == 0
         taps = taps + 1;
@@ -479,15 +482,16 @@ function h = fce_fir_ideal(type, fs, fc1, fc2, N)
         if strcmp(type, 'lowpass')
             v = (2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs);
         elseif strcmp(type, 'highpass')
-            v = -(2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs);
-            if m == 0, v = v + 1; end
+            % delta - LP; band-limited delta is sinc(m), nonzero at the
+            % half-integer m of even tap counts
+            v = fce_sinc(m) - (2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs);
         elseif strcmp(type, 'bandpass')
             v = (2 * fc2 / fs) * fce_sinc(2 * fc2 * m / fs) ...
                 - (2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs);
         elseif strcmp(type, 'bandstop')
-            v = (2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs) ...
-                - (2 * fc2 / fs) * fce_sinc(2 * fc2 * m / fs);
-            if m == 0, v = v + 1; end
+            v = fce_sinc(m) ...
+                - (2 * fc2 / fs) * fce_sinc(2 * fc2 * m / fs) ...
+                + (2 * fc1 / fs) * fce_sinc(2 * fc1 * m / fs);
         elseif strcmp(type, 'hilbert')
             if fc1 > 0 && fc2 > fc1
                 w1 = 2 * pi * fc1 / fs; w2 = 2 * pi * fc2 / fs;
@@ -527,7 +531,10 @@ function g = fce_fir_gain_at(h, w)
 end
 
 function g = fce_fir_peak_in_band(h, fs, f_lo, f_hi)
-    grid = 256;
+    % grid scales with N so one bracket stays below a ripple period
+    % (~fs/(N-1) Hz); golden-section needs a unimodal bracket
+    grid = max(256, 4 * numel(h));
+    grid = min(grid, 4096);
     if f_lo <= 0, f_lo = 0; end
     if f_hi >= 0.5 * fs, f_hi = 0.5 * fs; end
     if f_hi <= f_lo, f_hi = 0.5 * fs; end
@@ -605,23 +612,23 @@ function r = fce_fir_design(s)
     elseif strcmp(norm, 'nyquist')
         norm_gain = fce_fir_gain_at(h, pi);
     elseif strcmp(norm, 'passband_peak')
-        if strcmp(type, 'bandpass') || strcmp(type, 'bandstop')
-            f_lo = fc1; f_hi = fc2;
-        elseif strcmp(type, 'hilbert')
-            if fc1 > 0 && fc2 > fc1
-                f_lo = fc1; f_hi = fc2;
-            else
-                f_lo = 0; f_hi = 0.5 * fs;
-            end
-        else
-            f_lo = 0; f_hi = 0.5 * fs;
-        end
+        [f_lo, f_hi] = fce_fir_passband(type, fs, fc1, fc2);
         norm_gain = fce_fir_peak_in_band(h, fs, f_lo, f_hi);
     else  % 'none'
         norm_gain = 1;
     end
 
-    if ~(norm_gain > 0) || ~(norm_gain < 1e300)
+    % degenerate reference (symmetry null on the AUTO reference edge):
+    % AUTO falls back to the passband peak; explicit request errors out
+    hmax = max(abs(h));
+    if fce_norm_gain_bad(norm_gain, hmax) ...
+            && strcmp(s.normalization, 'auto') ...
+            && ~strcmp(norm, 'passband_peak')
+        norm = 'passband_peak';
+        [f_lo, f_hi] = fce_fir_passband(type, fs, fc1, fc2);
+        norm_gain = fce_fir_peak_in_band(h, fs, f_lo, f_hi);
+    end
+    if fce_norm_gain_bad(norm_gain, hmax)
         error('FilterCoeff:numerical', 'normalization failed');
     end
     h = h / norm_gain;
@@ -631,15 +638,38 @@ function r = fce_fir_design(s)
     r.kaiser_beta = beta;
     r.norm_factor = 1 / norm_gain;
     r.normalization = norm;
-    if strcmp(type, 'hilbert')
-        r.symmetry = 'III';
-    elseif strcmp(type, 'differentiator')
-        r.symmetry = 'IV';
+    % anti-symmetric responses follow tap parity: III (odd) / IV (even)
+    if strcmp(type, 'hilbert') || strcmp(type, 'differentiator')
+        if mod(N, 2) == 1, r.symmetry = 'III'; else, r.symmetry = 'IV'; end
     elseif mod(N, 2) == 1
         r.symmetry = 'I';
     else
         r.symmetry = 'II';
     end
+end
+
+function [f_lo, f_hi] = fce_fir_passband(type, fs, fc1, fc2)
+    % passband interval for passband-peak normalization
+    if strcmp(type, 'bandpass')
+        f_lo = fc1; f_hi = fc2;
+    elseif strcmp(type, 'highpass')
+        f_lo = fc1; f_hi = 0.5 * fs;
+    elseif strcmp(type, 'hilbert')
+        if fc1 > 0 && fc2 > fc1
+            f_lo = fc1; f_hi = fc2;
+        else
+            f_lo = 0; f_hi = 0.5 * fs;
+        end
+    else
+        % LP / BS / differentiator: full band (BS passbands are outside
+        % [fc1, fc2]; scanning the stopband there was a bug)
+        f_lo = 0; f_hi = 0.5 * fs;
+    end
+end
+
+function bad = fce_norm_gain_bad(norm_gain, hmax)
+    bad = ~(norm_gain > 0) || ~(norm_gain < 1e300) ...
+          || ~(norm_gain > 1e-12 * hmax);
 end
 
 % ======================================================================
@@ -956,7 +986,9 @@ function d = fce_dist2(a, b)
     d = (real(a) - real(b))^2 + (imag(a) - imag(b))^2;
 end
 
-function consumed = fce_consume(arr, used, n, v)
+function [consumed, used] = fce_consume(arr, used, n, v)
+    % NOTE: MATLAB is pass-by-value - the updated `used` mask must be
+    % returned and reassigned by the caller, or the marks are lost.
     consumed = 0;
     need_conj = ~fce_is_real(v);
     if need_conj
@@ -1057,7 +1089,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
             error('FilterCoeff:numerical', 'no remaining pole');
         end
         p1 = dp(p1i);
-        np_rem = np_rem - fce_consume(dp, up, npad, p1);
+        [cused, up] = fce_consume(dp, up, npad, p1);
+        np_rem = np_rem - cused;
         nreal_p = 0;
         for j = 1:npad
             if ~up(j) && fce_is_real(dp(j))
@@ -1073,7 +1106,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
         if fce_is_real(p1) && nreal_p == 0
             z1i = fce_nearest_zero(dz, uz, nzpad, p1, 1);
             if z1i < nzpad
-                nz_rem = nz_rem - fce_consume(dz, uz, nzpad, dz(z1i));
+                [cused, uz] = fce_consume(dz, uz, nzpad, dz(z1i));
+                nz_rem = nz_rem - cused;
             end
             if z1i < nzpad
                 zs = [dz(z1i), 0 + 0i];
@@ -1088,7 +1122,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
             if z1i == nzpad
                 error('FilterCoeff:numerical', 'pairing failed');
             end
-            nz_rem = nz_rem - fce_consume(dz, uz, nzpad, dz(z1i));
+            [cused, uz] = fce_consume(dz, uz, nzpad, dz(z1i));
+            nz_rem = nz_rem - cused;
             zs = [dz(z1i), conj(dz(z1i))];
             ps = [p1, conj(p1)];
             sos(si, :) = fce_section_make(zs, ps);
@@ -1107,7 +1142,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
                     error('FilterCoeff:numerical', 'no real pole 2');
                 end
                 p2 = dp(p2i);
-                np_rem = np_rem - fce_consume(dp, up, npad, p2);
+                [cused, up] = fce_consume(dp, up, npad, p2);
+                np_rem = np_rem - cused;
             else
                 p2 = conj(p1);
             end
@@ -1117,7 +1153,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
                 continue;
             end
             z1 = dz(z1i);
-            nz_rem = nz_rem - fce_consume(dz, uz, nzpad, z1);
+            [cused, uz] = fce_consume(dz, uz, nzpad, z1);
+            nz_rem = nz_rem - cused;
             if ~fce_is_real(z1)
                 zs = [z1, conj(z1)];
             else
@@ -1125,7 +1162,8 @@ function [sos, k] = fce_zpk2sos(z, p, k)
                 z2i = fce_nearest_zero(dz, uz, nzpad, p1, 1);
                 if z2i < nzpad
                     zs = [zs, dz(z2i)];
-                    nz_rem = nz_rem - fce_consume(dz, uz, nzpad, dz(z2i));
+                    [cused, uz] = fce_consume(dz, uz, nzpad, dz(z2i));
+                    nz_rem = nz_rem - cused;
                 end
             end
             sos(si, :) = fce_section_make(zs, [p1, p2]);
@@ -1140,6 +1178,7 @@ function a = fce_iir_auto_order(s)
     fs = s.fs;
     type = s.iir_type;
     fam = s.iir_family;
+    a.clamped = 0;
     gpass_db = s.passband_ripple_db;
     if ~(gpass_db > 0), gpass_db = 3; end
     gstop_db = s.stopband_atten_db;
@@ -1183,6 +1222,15 @@ function a = fce_iir_auto_order(s)
         passb2 = fce_prewarp(wp2, fs);
         stopb1 = fce_prewarp(ws1, fs);
         stopb2 = fce_prewarp(ws2, fs);
+        % scipy _find_nat_freq: optimize each passband edge so the
+        % fractional order is minimal (band_stop_obj + fminbound)
+        gp = 10 ^ (0.1 * gpass_db);
+        gs = 10 ^ (0.1 * gstop_db);
+        opt0 = fce_bs_fminbound(0, passb1, stopb1 - 1e-12, ...
+                                passb1, passb2, stopb1, stopb2, gp, gs, fam);
+        opt1 = fce_bs_fminbound(1, stopb2 + 1e-12, passb2, ...
+                                passb1, passb2, stopb1, stopb2, gp, gs, fam);
+        passb1 = opt0; passb2 = opt1;
         n1 = abs((stopb1 * (passb1 - passb2)) / ...
                  (stopb1 * stopb1 - passb1 * passb2));
         n2 = abs((stopb2 * (passb1 - passb2)) / ...
@@ -1213,7 +1261,10 @@ function a = fce_iir_auto_order(s)
         error('FilterCoeff:spec', 'bad iir_family');
     end
     if n < 1, error('FilterCoeff:spec', 'bad order'); end
-    if n > 24, n = 24; end   % FCE_MAX_AUTO_ORDER
+    if n > 24   % FCE_MAX_AUTO_ORDER; reported like FCE_FLAG_ORDER_CLAMPED
+        n = 24;
+        a.clamped = 1;
+    end
 
     w0 = 1;
     if strcmp(fam, 'butterworth')
@@ -1246,14 +1297,23 @@ function a = fce_iir_auto_order(s)
             df2 = fs * atan(wn_hi / (2 * fs)) / pi;
         end
     elseif strcmp(type, 'bandstop')
-        bw = passb2 - passb1;
-        if strcmp(fam, 'chebyshev2'), w0b = 1; else, w0b = w0; end
-        discr = sqrt(bw * bw + 4 * w0b * w0b * passb1 * passb2);
-        wn_hi = (bw + discr) / (2 * w0b);
-        wn_lo = (discr - bw) / (2 * w0b);
         if strcmp(fam, 'chebyshev2')
-            df1 = s.fc1; df2 = s.fc2;
+            % cheb2ord filter_type=3: -gpass frequency via new_freq
+            v = fce_acosh(sqrt((gstop - 1) / (gpass - 1)));
+            new_freq = 1 / cosh(v / n);
+            nat0 = (new_freq * 0.5 * (passb1 - passb2)) + ...
+                sqrt(new_freq * new_freq * (passb2 - passb1) * ...
+                     (passb2 - passb1) * 0.25 + passb1 * passb2);
+            nat1 = passb1 * passb2 / nat0;
+            lo = min(nat0, nat1); hi = max(nat0, nat1);
+            df1 = fs * atan(lo / (2 * fs)) / pi;
+            df2 = fs * atan(hi / (2 * fs)) / pi;
         else
+            % butter: discr formula; cheb1/ellip: the optimized edges
+            bw = passb2 - passb1;
+            discr = sqrt(bw * bw + 4 * w0 * w0 * passb1 * passb2);
+            wn_hi = (bw + discr) / (2 * w0);
+            wn_lo = (discr - bw) / (2 * w0);
             df1 = fs * atan(wn_lo / (2 * fs)) / pi;
             df2 = fs * atan(wn_hi / (2 * fs)) / pi;
         end
@@ -1265,6 +1325,98 @@ end
 
 function y = fce_acosh(x)
     y = log(x + sqrt(x * x - 1));
+end
+
+function n = fce_bs_obj(wp, ind, pb0, pb1, sb0, sb1, gpass, gstop, fam)
+    % scipy band_stop_obj: fractional bandstop order as one passband
+    % edge is moved (the other stays fixed)
+    if ind == 0, p0 = wp; else, p0 = pb0; end
+    if ind == 1, p1 = wp; else, p1 = pb1; end
+    n1 = abs(sb0 * (p0 - p1) / (sb0 * sb0 - p0 * p1));
+    n2 = abs(sb1 * (p0 - p1) / (sb1 * sb1 - p0 * p1));
+    nat = min(n1, n2);
+    if strcmp(fam, 'butterworth')
+        n = log10((gstop - 1) / (gpass - 1)) / (2 * log10(nat));
+    elseif strcmp(fam, 'elliptic')
+        arg1_sq = (gpass - 1) / (gstop - 1);
+        arg0 = 1 / nat;
+        d00 = fce_ellipk(arg0 * arg0);
+        d01 = fce_ellipkm1(arg0 * arg0);
+        d10 = fce_ellipk(arg1_sq);
+        d11 = fce_ellipkm1(arg1_sq);
+        n = d00 * d11 / (d01 * d10);
+    else  % cheby 1 & 2
+        n = fce_acosh(sqrt((gstop - 1) / (gpass - 1))) / fce_acosh(nat);
+    end
+end
+
+function xf = fce_bs_fminbound(ind, x1, x2, pb0, pb1, sb0, sb1, ...
+                               gpass, gstop, fam)
+    % bounded Brent minimization; 1:1 port of scipy
+    % _minimize_scalar_bounded (xatol=1e-5, maxfun=500)
+    sqrt_eps = 1.4901161193847656e-08;   % sqrt(2.2e-16)
+    golden_mean = 0.38196601125010510;   % 0.5*(3-sqrt(5))
+    xatol = 1e-5;
+    a = x1; b = x2;
+    fulc = a + golden_mean * (b - a); nfc = fulc; xf = fulc;
+    fx = fce_bs_obj(xf, ind, pb0, pb1, sb0, sb1, gpass, gstop, fam);
+    ffulc = fx; fnfc = fx;
+    rat = 0; e = 0;
+    xm = 0.5 * (a + b);
+    tol1 = sqrt_eps * abs(xf) + xatol / 3;
+    tol2 = 2 * tol1;
+    num = 1;
+    while abs(xf - xm) > (tol2 - 0.5 * (b - a))
+        golden = true;
+        if abs(e) > tol1
+            golden = false;
+            r = (xf - nfc) * (fx - ffulc);
+            q = (xf - fulc) * (fx - fnfc);
+            p = (xf - fulc) * q - (xf - nfc) * r;
+            q = 2 * (q - r);
+            if q > 0, p = -p; end
+            q = abs(q);
+            r = e;
+            e = rat;
+            if (abs(p) < abs(0.5 * q * r)) && (p > q * (a - xf)) ...
+                    && (p < q * (b - xf))
+                rat = p / q;
+                x = xf + rat;
+                if (x - a) < tol2 || (b - x) < tol2
+                    if xm >= xf, si = 1; else, si = -1; end
+                    rat = tol1 * si;
+                end
+            else
+                golden = true;
+            end
+        end
+        if golden
+            if xf >= xm, e = a - xf; else, e = b - xf; end
+            rat = golden_mean * e;
+        end
+        if rat > 0, si = 1; elseif rat < 0, si = -1; else, si = 1; end
+        x = xf + si * max(abs(rat), tol1);
+        fu = fce_bs_obj(x, ind, pb0, pb1, sb0, sb1, gpass, gstop, fam);
+        num = num + 1;
+        if num >= 500, break; end
+        if fu <= fx
+            if x >= xf, a = xf; else, b = xf; end
+            fulc = nfc; ffulc = fnfc;
+            nfc = xf; fnfc = fx;
+            xf = x; fx = fu;
+        else
+            if x < xf, a = x; else, b = x; end
+            if (fu <= fnfc) || (nfc == xf)
+                fulc = nfc; ffulc = fnfc;
+                nfc = x; fnfc = fu;
+            elseif (fu <= ffulc) || (fulc == xf) || (fulc == nfc)
+                fulc = x; ffulc = fu;
+            end
+        end
+        xm = 0.5 * (a + b);
+        tol1 = sqrt_eps * abs(xf) + xatol / 3;
+        tol2 = 2 * tol1;
+    end
 end
 
 function r = fce_iir_design(s)

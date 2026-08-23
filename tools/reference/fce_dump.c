@@ -289,6 +289,38 @@ int main(void)
     sp.precision = FCE_PRECISION_FLOAT64;
     dump("iir_ellip_auto_bs", &sp);
 
+    /* bandstop auto-order follows scipy's optimized-passband rule
+     * (_find_nat_freq / band_stop_obj) since v1.0 */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_BUTTERWORTH;
+    sp.iir_type = FCE_IIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 2500; sp.fc2 = 6000; sp.order = 0;
+    sp.edge1_hz = 1500; sp.edge2_hz = 9000;
+    sp.passband_ripple_db = 1.0; sp.stopband_atten_db = 50;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    dump("iir_butter_auto_bs", &sp);
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV1;
+    sp.iir_type = FCE_IIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 2500; sp.fc2 = 6000; sp.order = 0;
+    sp.edge1_hz = 1500; sp.edge2_hz = 9000;
+    sp.passband_ripple_db = 1.0; sp.stopband_atten_db = 50;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    dump("iir_cheby1_auto_bs", &sp);
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV2;
+    sp.iir_type = FCE_IIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 2500; sp.fc2 = 6000; sp.order = 0;
+    sp.edge1_hz = 1500; sp.edge2_hz = 9000;
+    sp.passband_ripple_db = 1.0; sp.stopband_atten_db = 50;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    dump("iir_cheby2_auto_bs", &sp);
+
     /* fixed point cases */
     fce_spec_defaults(&sp);
     sp.kind = FCE_KIND_FIR;

@@ -19,6 +19,60 @@
 #include "fce_internal.h"
 
 /* ================================================================== */
+/* numerical helpers                                                    */
+/* ================================================================== */
+
+/*
+ * Re(prod(-num)/prod(-den)) without overflow.
+ *
+ * The naive formulation squares the accumulated magnitudes
+ * (dot / (re^2+im^2)) and overflows beyond ~1e154 - e.g. the bilinear
+ * gain compensation of a BP/BS design near order 22-25 silently
+ * collapsed the filter gain to 0, or to NaN a few orders higher.
+ * Here the ratio is accumulated factor-by-factor as a running complex
+ * division, so no giant intermediate is ever squared.
+ * Signs cancel per pair: (-a)/(-b) = a/b.
+ */
+static double fce_ratio_neg_products(const fce_cplx_t* num, uint32_t nnum,
+                                     const fce_cplx_t* den, uint32_t nden)
+{
+    fce_cplx_t q = fce_cx(1.0, 0.0);
+    uint32_t i, n = (nnum > nden) ? nnum : nden;
+    for (i = 0; i < n; i++)
+    {
+        if (i < nnum)
+            q = fce_cx_mul(q, fce_cx_scale(num[i], -1.0));
+        if (i < nden)
+            q = fce_cx_div(q, fce_cx_scale(den[i], -1.0));
+    }
+    return q.re;
+}
+
+/*
+ * Re(prod(fs2 - z)/prod(fs2 - p)) without overflow.
+ * Same idea as above; every factor is additionally scaled by 1/fs2
+ * (corrected by fs2^(nz-np) at the end) so each complex factor stays
+ * around unit magnitude.
+ */
+static double fce_ratio_bilinear(const fce_cplx_t* z, uint32_t nz,
+                                 const fce_cplx_t* p, uint32_t np, double fs2)
+{
+    fce_cplx_t q = fce_cx(1.0, 0.0);
+    double inv = 1.0 / fs2;
+    uint32_t i, n = (np > nz) ? np : nz;
+    for (i = 0; i < n; i++)
+    {
+        if (i < np)
+            q = fce_cx_div(q, fce_cx_scale(fce_cx_sub(fce_cx(fs2, 0.0),
+                                                      p[i]), inv));
+        if (i < nz)
+            q = fce_cx_mul(q, fce_cx_scale(fce_cx_sub(fce_cx(fs2, 0.0),
+                                                      z[i]), inv));
+    }
+    return q.re * pow(fs2, (double)nz - (double)np);
+}
+
+/* ================================================================== */
 /* analog lowpass prototypes (cutoff = 1 rad/s)                        */
 /* ================================================================== */
 
@@ -60,8 +114,6 @@ void proto_cheb2(uint32_t n, double rs, fce_cplx_t* z, uint32_t* nz,
     double de = 1.0 / sqrt(pow(10.0, 0.1 * rs) - 1.0);
     double mu = asinh(1.0 / de) / (double)n;
     uint32_t i;
-    fce_cplx_t prod_z = fce_cx(1.0, 0.0);
-    fce_cplx_t prod_p = fce_cx(1.0, 0.0);
 
     *nz = 0;
     {
@@ -99,13 +151,8 @@ void proto_cheb2(uint32_t n, double rs, fce_cplx_t* z, uint32_t* nz,
         p[i] = fce_cx_div(fce_cx(-1.0, 0.0), s);
     }
 
-    for (i = 0; i < n; i++)
-        prod_p = fce_cx_mul(prod_p, fce_cx_scale(p[i], -1.0));
-    for (i = 0; i < *nz; i++)
-        prod_z = fce_cx_mul(prod_z, fce_cx_scale(z[i], -1.0));
     /* k = Re(prod(-p) / prod(-z)) */
-    *k = (prod_p.re * prod_z.re + prod_p.im * prod_z.im) /
-         (prod_z.re * prod_z.re + prod_z.im * prod_z.im);
+    *k = fce_ratio_neg_products(p, n, z, *nz);
 }
 
 fce_status_t proto_ellip(uint32_t n, double rp, double rs,
@@ -114,8 +161,6 @@ fce_status_t proto_ellip(uint32_t n, double rp, double rs,
 {
     double eps_sq, eps, ck1_sq, val0, val1, m, capk, r, v0;
     uint32_t j;
-    fce_cplx_t prod_z = fce_cx(1.0, 0.0);
-    fce_cplx_t prod_p = fce_cx(1.0, 0.0);
 
     if (n == 1)
     {
@@ -212,12 +257,7 @@ fce_status_t proto_ellip(uint32_t n, double rp, double rs,
     }
 
     /* ---- gain: k = Re(prod(-p)/prod(-z)); even order: /sqrt(1+eps^2) ---- */
-    for (j = 0; j < *np; j++)
-        prod_p = fce_cx_mul(prod_p, fce_cx_scale(p[j], -1.0));
-    for (j = 0; j < *nz; j++)
-        prod_z = fce_cx_mul(prod_z, fce_cx_scale(z[j], -1.0));
-    *k = (prod_p.re * prod_z.re + prod_p.im * prod_z.im) /
-         (prod_z.re * prod_z.re + prod_z.im * prod_z.im);
+    *k = fce_ratio_neg_products(p, *np, z, *nz);
     if ((n & 1u) == 0u)
         *k /= sqrt(1.0 + eps_sq);
     (void)val1;
@@ -302,16 +342,10 @@ static void tr_lp2hp(fce_cplx_t* z, uint32_t* nz, fce_cplx_t* p, uint32_t np,
                      double* k, double wo)
 {
     uint32_t i, deg = np - *nz;
-    fce_cplx_t pz = fce_cx(1.0, 0.0);
-    fce_cplx_t pp = fce_cx(1.0, 0.0);
 
     /* gain compensation uses the ORIGINAL prototype values
      * (scipy: k_hp = k * Re(prod(-z) / prod(-p))) */
-    for (i = 0; i < *nz; i++)
-        pz = fce_cx_mul(pz, fce_cx_scale(z[i], -1.0));
-    for (i = 0; i < np; i++)
-        pp = fce_cx_mul(pp, fce_cx_scale(p[i], -1.0));
-    *k *= (pz.re * pp.re + pz.im * pp.im) / (pp.re * pp.re + pp.im * pp.im);
+    *k *= fce_ratio_neg_products(z, *nz, p, np);
 
     for (i = 0; i < *nz; i++)
         z[i] = fce_cx_div(fce_cx(wo, 0.0), z[i]);
@@ -358,8 +392,6 @@ static void tr_lp2bs(const fce_cplx_t* z, uint32_t nz,
                      fce_cplx_t* po, uint32_t* npo, double* ko)
 {
     uint32_t i, deg = np - nz;
-    fce_cplx_t pz = fce_cx(1.0, 0.0);
-    fce_cplx_t pp = fce_cx(1.0, 0.0);
     for (i = 0; i < nz; i++)
     {
         fce_cplx_t a = fce_cx_div(fce_cx(0.5 * bw, 0.0), z[i]);
@@ -381,11 +413,7 @@ static void tr_lp2bs(const fce_cplx_t* z, uint32_t nz,
 
     /* gain compensation uses the ORIGINAL prototype values
      * (scipy: k_bs = k * Re(prod(-z) / prod(-p))) */
-    for (i = 0; i < nz; i++)
-        pz = fce_cx_mul(pz, fce_cx_scale(z[i], -1.0));
-    for (i = 0; i < np; i++)
-        pp = fce_cx_mul(pp, fce_cx_scale(p[i], -1.0));
-    *ko = k * (pz.re * pp.re + pz.im * pp.im) / (pp.re * pp.re + pp.im * pp.im);
+    *ko = k * fce_ratio_neg_products(z, nz, p, np);
 
     for (i = 0; i < deg; i++)
     {
@@ -402,17 +430,11 @@ static void tr_bilinear(fce_cplx_t* z, uint32_t* nz,
                         fce_cplx_t* p, uint32_t np, double* k, double fs)
 {
     uint32_t i, deg = np - *nz;
-    fce_cplx_t pz = fce_cx(1.0, 0.0);
-    fce_cplx_t pp = fce_cx(1.0, 0.0);
     double fs2 = 2.0 * fs;
 
     /* gain compensation uses the ANALOG values, so compute it first
      * (scipy: k_z = k * Re(prod(fs2 - z) / prod(fs2 - p))) */
-    for (i = 0; i < *nz; i++)
-        pz = fce_cx_mul(pz, fce_cx_sub(fce_cx(fs2, 0.0), z[i]));
-    for (i = 0; i < np; i++)
-        pp = fce_cx_mul(pp, fce_cx_sub(fce_cx(fs2, 0.0), p[i]));
-    *k *= (pz.re * pp.re + pz.im * pp.im) / (pp.re * pp.re + pp.im * pp.im);
+    *k *= fce_ratio_bilinear(z, *nz, p, np, fs2);
 
     /* map poles and zeros: z -> (2fs + z)/(2fs - z) */
     for (i = 0; i < *nz; i++)
@@ -547,6 +569,164 @@ static double fce_acosh(double x)
     return log(x + sqrt(x * x - 1.0));
 }
 
+/* ================================================================== */
+/* bandstop order minimization (scipy band_stop_obj + fminbound)       */
+/* ================================================================== */
+
+/*
+ * Modern scipy (>= ~1.10) does NOT compute the bandstop order from the
+ * user's edges directly: the classic min(n1, n2) transition ratio
+ * systematically over-estimates the order. Instead _find_nat_freq
+ * optimizes each PASSBAND edge (fminbound of band_stop_obj) so that
+ * the fractional order is minimal, and derives nat from the optimized
+ * edges. Mirror that here so fce orders match scipy's.
+ */
+
+typedef struct fce_bs_obj_ctx
+{
+    double passb0, passb1;   /* prewarped passband edges (fixed sides) */
+    double stopb0, stopb1;   /* prewarped stopband edges               */
+    double gpass, gstop;     /* linear (10^(db/10))                    */
+    int      family;         /* fce_iir_family_t                       */
+    int      ind;            /* which passband edge is optimized (0/1) */
+} fce_bs_obj_ctx_t;
+
+static double fce_bs_obj(double wp, const fce_bs_obj_ctx_t* c)
+{
+    double p0 = (c->ind == 0) ? wp : c->passb0;
+    double p1 = (c->ind == 1) ? wp : c->passb1;
+    double n1 = fabs(c->stopb0 * (p0 - p1) /
+                     (c->stopb0 * c->stopb0 - p0 * p1));
+    double n2 = fabs(c->stopb1 * (p0 - p1) /
+                     (c->stopb1 * c->stopb1 - p0 * p1));
+    double nat = (n1 < n2) ? n1 : n2;
+
+    switch (c->family)
+    {
+    case FCE_IIR_BUTTERWORTH:
+        return log10((c->gstop - 1.0) / (c->gpass - 1.0)) /
+               (2.0 * log10(nat));
+    case FCE_IIR_ELLIPTIC:
+    {
+        double arg1_sq = (c->gpass - 1.0) / (c->gstop - 1.0);
+        double arg0 = 1.0 / nat;
+        double d00 = fce_ellipk(arg0 * arg0);
+        double d01 = fce_ellipkm1(arg0 * arg0);
+        double d10 = fce_ellipk(arg1_sq);
+        double d11 = fce_ellipkm1(arg1_sq);
+        return d00 * d11 / (d01 * d10);
+    }
+    default: /* cheby 1 & 2 */
+        return fce_acosh(sqrt((c->gstop - 1.0) / (c->gpass - 1.0))) /
+               fce_acosh(nat);
+    }
+}
+
+/*
+ * Bounded Brent minimization: a 1:1 port of scipy's
+ * _minimize_scalar_bounded (golden section + parabolic interpolation,
+ * xatol = 1e-5, maxfun = 500). Returns the minimizer of fn in [x1, x2].
+ */
+static double fce_fminbound(fce_bs_obj_ctx_t* ctx, double x1, double x2)
+{
+    const double sqrt_eps = 1.4901161193847656e-08; /* sqrt(2.2e-16)   */
+    const double golden_mean = 0.38196601125010510; /* 0.5*(3-sqrt(5)) */
+    const double xatol = 1e-5;
+    double a = x1, b = x2;
+    double fulc, nfc, xf;
+    double ffulc, fnfc, fx, fu = 1e300;
+    double rat = 0.0, e = 0.0, x;
+    double xm, tol1, tol2;
+    int num = 1;
+    int golden;
+
+    fulc = nfc = xf = a + golden_mean * (b - a);
+    fx = fce_bs_obj(xf, ctx);
+    ffulc = fnfc = fx;
+    xm = 0.5 * (a + b);
+    tol1 = sqrt_eps * fabs(xf) + xatol / 3.0;
+    tol2 = 2.0 * tol1;
+
+    while (fabs(xf - xm) > (tol2 - 0.5 * (b - a)))
+    {
+        double p = 0.0, q = 0.0, r;
+        golden = 1;
+        if (fabs(e) > tol1)
+        {
+            golden = 0;
+            r = (xf - nfc) * (fx - ffulc);
+            q = (xf - fulc) * (fx - fnfc);
+            p = (xf - fulc) * q - (xf - nfc) * r;
+            q = 2.0 * (q - r);
+            if (q > 0.0)
+                p = -p;
+            q = fabs(q);
+            r = e;
+            e = rat;
+            if ((fabs(p) < fabs(0.5 * q * r)) && (p > q * (a - xf)) &&
+                (p < q * (b - xf)))
+            {
+                rat = p / q;
+                x = xf + rat;
+                if ((x - a) < tol2 || (b - x) < tol2)
+                {
+                    /* scipy: si = sign(xm - xf) + (xm == xf) -> +1 on tie */
+                    double si = (xm >= xf) ? 1.0 : -1.0;
+                    rat = tol1 * si;
+                }
+            }
+            else
+            {
+                golden = 1;
+            }
+        }
+        if (golden)
+        {
+            e = (xf >= xm) ? (a - xf) : (b - xf);
+            rat = golden_mean * e;
+        }
+        {
+            /* scipy: si = sign(rat) + (rat == 0) -> +1 on zero */
+            double si = (rat > 0.0) ? 1.0 : (rat < 0.0 ? -1.0 : 1.0);
+            double marat = (fabs(rat) > tol1) ? fabs(rat) : tol1;
+            x = xf + si * marat;
+        }
+        fu = fce_bs_obj(x, ctx);
+        if (++num >= 500)
+            break;
+        if (fu <= fx)
+        {
+            if (x >= xf)
+                a = xf;
+            else
+                b = xf;
+            fulc = nfc; ffulc = fnfc;
+            nfc = xf;   fnfc = fx;
+            xf = x;     fx = fu;
+        }
+        else
+        {
+            if (x < xf)
+                a = x;
+            else
+                b = x;
+            if ((fu <= fnfc) || (nfc == xf))
+            {
+                fulc = nfc; ffulc = fnfc;
+                nfc = x;    fnfc = fu;
+            }
+            else if ((fu <= ffulc) || (fulc == xf) || (fulc == nfc))
+            {
+                fulc = x;   ffulc = fu;
+            }
+        }
+        xm = 0.5 * (a + b);
+        tol1 = sqrt_eps * fabs(xf) + xatol / 3.0;
+        tol2 = 2.0 * tol1;
+    }
+    return xf;
+}
+
 fce_status_t fce_iir_auto_order(const fce_spec_t* sp, fce_auto_t* a)
 {
     double wp1, wp2, ws1, ws2;   /* band edges [Hz] */
@@ -555,6 +735,7 @@ fce_status_t fce_iir_auto_order(const fce_spec_t* sp, fce_auto_t* a)
     uint32_t n = 0;
     double fs = sp->fs;
 
+    a->clamped = 0;
     gpass_db = (sp->passband_ripple_db > 0.0) ? sp->passband_ripple_db : 3.0;
     gstop_db = sp->stopband_atten_db;
     if (!(gstop_db > gpass_db))
@@ -608,11 +789,36 @@ fce_status_t fce_iir_auto_order(const fce_spec_t* sp, fce_auto_t* a)
         stopb1 = fce_prewarp(ws1, fs);
         stopb2 = fce_prewarp(ws2, fs);
         {
-            double n1 = fabs((stopb1 * (passb1 - passb2)) /
-                             (stopb1 * stopb1 - passb1 * passb2));
-            double n2 = fabs((stopb2 * (passb1 - passb2)) /
-                             (stopb2 * stopb2 - passb1 * passb2));
-            nat = (n1 < n2) ? n1 : n2;
+            /* scipy _find_nat_freq: optimize each passband edge so the
+             * fractional order is minimal (the plain min(n1, n2) over
+             * estimates the bandstop order), then derive nat from the
+             * optimized edges. */
+            fce_bs_obj_ctx_t ctx;
+            double opt0, opt1;
+            ctx.stopb0 = stopb1;
+            ctx.stopb1 = stopb2;
+            ctx.gpass = pow(10.0, 0.1 * gpass_db);
+            ctx.gstop = pow(10.0, 0.1 * gstop_db);
+            ctx.family = (int)sp->iir_family;
+
+            /* both minimizations run against the ORIGINAL edges;
+             * each keeps the other passband edge fixed */
+            ctx.passb0 = passb1;
+            ctx.passb1 = passb2;
+            ctx.ind = 0;
+            opt0 = fce_fminbound(&ctx, passb1, stopb1 - 1e-12);
+            ctx.ind = 1;
+            opt1 = fce_fminbound(&ctx, stopb2 + 1e-12, passb2);
+            passb1 = opt0;
+            passb2 = opt1;
+
+            {
+                double n1 = fabs((stopb1 * (passb1 - passb2)) /
+                                 (stopb1 * stopb1 - passb1 * passb2));
+                double n2 = fabs((stopb2 * (passb1 - passb2)) /
+                                 (stopb2 * stopb2 - passb1 * passb2));
+                nat = (n1 < n2) ? n1 : n2;
+            }
         }
         a->design_fc1 = 0.0; a->design_fc2 = 0.0;
         break;
@@ -657,7 +863,10 @@ fce_status_t fce_iir_auto_order(const fce_spec_t* sp, fce_auto_t* a)
     if (n < 1u)
         return FCE_ERR_INVALID_SPEC;
     if (n > FCE_MAX_AUTO_ORDER)
-        n = FCE_MAX_AUTO_ORDER; /* clamped; flag set by caller */
+    {
+        n = FCE_MAX_AUTO_ORDER;
+        a->clamped = 1; /* reported via FCE_FLAG_ORDER_CLAMPED by the caller */
+    }
 
     a->order = n;
 
@@ -712,24 +921,34 @@ fce_status_t fce_iir_auto_order(const fce_spec_t* sp, fce_auto_t* a)
             break;
         }
         case FCE_IIR_BANDSTOP:
+        if (sp->iir_family == FCE_IIR_CHEBYSHEV2)
         {
-            double bw = passb2 - passb1;
-            double w0b = (sp->iir_family == FCE_IIR_CHEBYSHEV2) ? 1.0 : w0;
-            double discr = sqrt(bw * bw + 4.0 * w0b * w0b * passb1 * passb2);
-            double wn_hi = (bw + discr) / (2.0 * w0b);
-            double wn_lo = (discr - bw) / (2.0 * w0b);
-            if (sp->iir_family == FCE_IIR_CHEBYSHEV2)
-            {
-                a->design_fc1 = sp->fc1;
-                a->design_fc2 = sp->fc2;
-            }
-            else
-            {
-                a->design_fc1 = fs * atan(wn_lo / (2.0 * fs)) / FCE_PI;
-                a->design_fc2 = fs * atan(wn_hi / (2.0 * fs)) / FCE_PI;
-            }
-            break;
+            /* cheb2ord (filter_type=3): the -gpass response frequency is
+             * re-derived via new_freq so that BOTH specs are met with
+             * the integer-rounded order; not just the stopband edges */
+            double v = fce_acosh(sqrt((gstop - 1.0) / (gpass - 1.0)));
+            double new_freq = 1.0 / cosh(v / (double)n);
+            double nat0 = (new_freq * 0.5 * (passb1 - passb2)) +
+                sqrt(new_freq * new_freq * (passb2 - passb1) *
+                     (passb2 - passb1) * 0.25 + passb1 * passb2);
+            double nat1 = passb1 * passb2 / nat0;
+            double lo = (nat0 < nat1) ? nat0 : nat1;
+            double hi = (nat0 < nat1) ? nat1 : nat0;
+            a->design_fc1 = fs * atan(lo / (2.0 * fs)) / FCE_PI;
+            a->design_fc2 = fs * atan(hi / (2.0 * fs)) / FCE_PI;
         }
+        else
+        {
+            /* butter: discr formula with the optimized edges;
+             * cheb1/ellip: reduces to the optimized edges themselves */
+            double bw = passb2 - passb1;
+            double discr = sqrt(bw * bw + 4.0 * w0 * w0 * passb1 * passb2);
+            double wn_hi = (bw + discr) / (2.0 * w0);
+            double wn_lo = (discr - bw) / (2.0 * w0);
+            a->design_fc1 = fs * atan(wn_lo / (2.0 * fs)) / FCE_PI;
+            a->design_fc2 = fs * atan(wn_hi / (2.0 * fs)) / FCE_PI;
+        }
+        break;
         default:
             break;
         }
@@ -841,6 +1060,8 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
         for (i = 0; i < nz; i++) dz[i] = pz[i];
     }
     tr_bilinear(dz, &nz, dp, np, &k, fs);
+    if (!isfinite(k))
+        return FCE_ERR_NUMERICAL; /* hopeless conditioning */
 
     /* ---- expose digital poles/zeros (no black box) ---- */
     r->iir_poles = (const double*)(const void*)dp;
@@ -865,7 +1086,9 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
             dz[nzpad++] = fce_cx(0.0, 0.0);
         }
         ns = (npad + 1u) / 2u;
-        if (ns > FCE_MAX_SECTIONS)
+        /* the layout reserves `lay->order` sections (BP/BS double the
+         * prototype order, so ns can reach order, not (order+1)/2) */
+        if (ns > lay->order)
             return FCE_ERR_BUFFER_TOO_SMALL;
 
         memset(up, 0, sizeof(up));
@@ -937,7 +1160,8 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
             else
             {
                 fce_cplx_t p2;
-                fce_cplx_t zs[2], ps[2];
+                fce_cplx_t zs[2] = {{0.0, 0.0}, {0.0, 0.0}};
+                fce_cplx_t ps[2] = {{0.0, 0.0}, {0.0, 0.0}};
                 uint32_t nzsec = 0, npsec = 0;
 
                 if (FCE_IS_REAL(p1))
@@ -1008,9 +1232,12 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
 
     /* ---- section ordering + gain distribution ---- */
     {
-        double peaks[FCE_MAX_SECTIONS];
-        double key[FCE_MAX_SECTIONS];
+        /* sections can reach FCE_MAX_IIR_ORDER for BP/BS designs */
+        double peaks[FCE_MAX_IIR_ORDER];
+        double key[FCE_MAX_IIR_ORDER];
         uint32_t ns = lay->n_sections;
+        if (ns > FCE_MAX_IIR_ORDER)
+            return FCE_ERR_BUFFER_TOO_SMALL;
 
         for (i = 0; i < ns; i++)
         {
@@ -1079,6 +1306,13 @@ fce_status_t fce_iir_design(const fce_spec_t* sp, fce_result_t* r,
         }
         r->sos_order = sp->sos_order;
     }
+
+    /* numerical safety net: never return FCE_OK with NaN/Inf
+     * coefficients (only possible for hopelessly ill-conditioned specs);
+     * report it honestly as FCE_ERR_NUMERICAL instead */
+    for (i = 0; i < 5u * lay->n_sections; i++)
+        if (!isfinite(sos[i]))
+            return FCE_ERR_NUMERICAL;
 
     /* ---- float32 output (float64 always available) ---- */
     r->sos_f64 = sos;

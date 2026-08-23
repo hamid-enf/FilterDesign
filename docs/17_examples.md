@@ -42,7 +42,7 @@ make examples
 ```
 Taps      : 243
 Kaiser β  : 7.8573
-Stopband  : 80.1 dB   (مطلوب 80 ✓)
+Stopband  : 93.4 dB   (مطلوب 80 ✓ — فرمول Kaiser همیشه کمی حاشیه دارد)
 ```
 
 ## مثال ۹۸ — مرتبهٔ خودکار (خروجی)
@@ -52,6 +52,7 @@ Stopband  : 80.1 dB   (مطلوب 80 ✓)
 ```
 Order     : 9  (مطابق scipy.buttord)
 Sections  : 5
+Gain@2kHz : -62.9 dB (باید ≤ -60 باشد)
 Validation: PASS
 ```
 

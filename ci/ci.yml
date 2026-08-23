@@ -1,7 +1,7 @@
 # GitHub Actions CI for FilterCoeff
 #
-# The live workflow lives at .github/workflows/ci.yml. This copy is kept
-# here as a readable source of reference for contributors.
+# To enable CI, place this file at .github/workflows/ci.yml (needs a push
+# with workflow permissions, which this sandbox's GitHub App lacks).
 #
 name: CI
 
@@ -39,11 +39,32 @@ jobs:
       - name: Feature-minimal build (FIR only, no fixed-point)
         run: |
           make clean
-          gcc -O2 -std=c99 -Wall -DFCE_ENABLE_IIR=0 -DFCE_ENABLE_FIXED_POINT=0 \
+          gcc -fsyntax-only -O2 -std=c99 -Wall -DFCE_ENABLE_IIR=0 \
+              -DFCE_ENABLE_FIXED_POINT=0 \
               -DFCE_ENABLE_SIMULATION=0 -DFCE_ENABLE_EXPORT=0 \
               -Iinclude src/fce_math.c src/fce_fir.c src/fce_validate.c \
-              src/fce_generate.c -lm -o /tmp/min_build.o
+              src/fce_generate.c
           echo "minimal build OK"
+
+      - name: Feature-switch link matrix
+        run: |
+          echo 'int main(void){return 0;}' > /tmp/fce_main.c
+          for FLAGS in \
+            "-DFCE_ENABLE_VALIDATION=0" \
+            "-DFCE_ENABLE_IIR=0" \
+            "-DFCE_ENABLE_FIR=0" \
+            "-DFCE_ENABLE_FIXED_POINT=0" \
+            "-DFCE_ENABLE_IIR_BESSEL=0" \
+            "-DFCE_ENABLE_EXPORT=0 -DFCE_ENABLE_EXPORT_STDIO=0" \
+            "-DFCE_ENABLE_SIMULATION=0" \
+            "-DFCE_ENABLE_VALIDATION=0 -DFCE_ENABLE_FIXED_POINT=0" \
+          ; do
+            echo "checking: $FLAGS"
+            gcc -O2 -std=c99 -Wall -Wextra -Werror $FLAGS \
+                -Iinclude src/*.c /tmp/fce_main.c -lm -o /tmp/fce_feat \
+                || exit 1
+          done
+          echo "feature matrix OK"
 
       - name: Reference validation vs SciPy
         run: |

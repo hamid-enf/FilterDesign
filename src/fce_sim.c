@@ -84,6 +84,8 @@ uint32_t fce_sim_signal(fce_sim_signal_t kind, double a, double b,
     case FCE_SIM_WHITE_NOISE:
     {
         uint32_t seed = (uint32_t)a;
+        if (seed == 0u)
+            seed = 0x9E3779B9u; /* xorshift with a zero seed stays zero */
         for (i = 0; i < n; i++)
         {
             /* xorshift32 */

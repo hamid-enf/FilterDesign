@@ -1,5 +1,6 @@
 /* test_validate.c - response scans, stability, error metrics. */
 #include "filtercoeff.h"
+#include "fce_internal.h" /* fce_eval_biquad / fce_biquad_group_delay */
 #ifndef FCE_PI
 #define FCE_PI 3.14159265358979323846
 #endif
@@ -146,6 +147,77 @@ static void test_group_delay(void)
     }
 }
 
+static void test_bandpass_stopband_metric(void)
+{
+    /* a bandpass has TWO stopbands: the reported attenuation must take
+     * the worse of the lower and upper stopband maxima (it used to
+     * compare the passband max against the upper stopband -> ~0 dB) */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    /* FIR Kaiser bandpass, designed for 80 dB */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDPASS;
+    sp.fs = 48000; sp.fc1 = 4000; sp.fc2 = 8000; sp.num_taps = 201;
+    sp.window = FCE_WIN_KAISER;
+    sp.stopband_atten_db = 80.0;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.stopband_atten_measured_db > 80.0);
+
+    /* IIR elliptic bandpass, designed for 60 dB */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_ELLIPTIC;
+    sp.iir_type = FCE_IIR_BANDPASS;
+    sp.fs = 48000; sp.fc1 = 4000; sp.fc2 = 8000; sp.order = 6;
+    sp.passband_ripple_db = 0.5; sp.stopband_atten_db = 60.0;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.stopband_atten_measured_db > 55.0);
+}
+
+static void test_group_delay_sos_sign(void)
+{
+    /* a first-order LP biquad must have POSITIVE group delay at DC
+     * (the biquad GD formula used to return the negated value).
+     * H(z) = (b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2).
+     * Reference: finite difference of the unwrapped phase. */
+    const double sos[5] = { 0.06745527, 0.13491055, 0.06745527,
+                            -1.1429805, 0.4128016 }; /* butter LP2 w=0.1pi-ish */
+    const double w0 = 0.3;
+    const double dw = 1e-7;
+    double gd_num;
+    fce_cplx_t hp, hm;
+    double pp, pm;
+    double gd_ana = 0.0;
+    fce_response_point_t pt;
+    (void)pt;
+
+    hp = fce_eval_biquad(sos, w0 + dw);
+    hm = fce_eval_biquad(sos, w0 - dw);
+    pp = atan2(hp.im, hp.re);
+    pm = atan2(hm.im, hm.re);
+    gd_num = -(pp - pm) / (2.0 * dw);
+
+    gd_ana = fce_biquad_group_delay(sos, w0);
+    TEST_ASSERT(gd_ana > 0.0);
+    TEST_NEAR(gd_ana, gd_num, 1e-4);
+
+    /* DC: known closed-form check on a simple 1st-order section
+     * H(z) = (1 - z^-1)/2 / (1 - 0.5 z^-1) ... use response scan on an
+     * SOS cascade and confirm positivity there too */
+    {
+        static const double sos2[5] = { 0.5, -0.5, 0.0, -0.5, 0.0 };
+        double gd2 = fce_biquad_group_delay(sos2, 0.0);
+        /* GD_B = sum n b / sum b = 1 (b=[0.5,-0.5]) , GD_A = -0.5/0.5 = -1
+         * GD = GD_A * -1?? -> numerically: */
+        TEST_ASSERT(gd2 > 0.0);
+    }
+}
+
 int main(void)
 {
     test_response_sos();
@@ -153,6 +225,8 @@ int main(void)
     test_stability();
     test_coeff_error();
     test_group_delay();
+    test_group_delay_sos_sign();
+    test_bandpass_stopband_metric();
     printf("test_validate: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;
 }

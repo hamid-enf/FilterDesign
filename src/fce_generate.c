@@ -318,7 +318,7 @@ fce_status_t fce_generate(const fce_spec_t* spec,
     /* ---------- spec validation ---------- */
     if (sp.kind != FCE_KIND_FIR && sp.kind != FCE_KIND_IIR)
         hard = FCE_ERR_INVALID_SPEC;
-    if (sp.fs <= 0.0)
+    if (!(sp.fs > 0.0) || !isfinite(sp.fs))
         hard = FCE_ERR_INVALID_SPEC;
     if (sp.precision != FCE_PRECISION_FLOAT32 &&
         sp.precision != FCE_PRECISION_FLOAT64)
@@ -358,6 +358,7 @@ fce_status_t fce_generate(const fce_spec_t* spec,
         {
             if (sp.window != FCE_WIN_KAISER ||
                 !(sp.stopband_atten_db > 0.0) ||
+                !isfinite(sp.stopband_atten_db) ||
                 !(sp.transition_hz > 0.0) ||
                 !(sp.transition_hz < 0.5 * sp.fs))
                 hard = FCE_ERR_INVALID_SPEC;
@@ -367,6 +368,10 @@ fce_status_t fce_generate(const fce_spec_t* spec,
             hard = FCE_ERR_BUFFER_TOO_SMALL;
         }
         if (sp.num_taps == 1u)
+            hard = FCE_ERR_INVALID_SPEC;
+        if (sp.window == FCE_WIN_KAISER &&
+            (!isfinite(sp.kaiser_beta) ||
+             (sp.kaiser_beta == 0.0 && !isfinite(sp.stopband_atten_db))))
             hard = FCE_ERR_INVALID_SPEC;
         if (sp.window < FCE_WIN_RECTANGULAR || sp.window > FCE_WIN_TUKEY)
             hard = FCE_ERR_INVALID_SPEC;
@@ -390,13 +395,33 @@ fce_status_t fce_generate(const fce_spec_t* spec,
         if (sp.iir_family == FCE_IIR_CHEBYSHEV1 ||
             sp.iir_family == FCE_IIR_ELLIPTIC)
         {
-            if (!(sp.passband_ripple_db > 0.0))
+            if (!(sp.passband_ripple_db > 0.0) ||
+                !isfinite(sp.passband_ripple_db))
                 hard = FCE_ERR_INVALID_SPEC;
         }
         if (sp.iir_family == FCE_IIR_CHEBYSHEV2 ||
             sp.iir_family == FCE_IIR_ELLIPTIC)
         {
-            if (!(sp.stopband_atten_db > 0.0))
+            if (!(sp.stopband_atten_db > 0.0) ||
+                !isfinite(sp.stopband_atten_db))
+                hard = FCE_ERR_INVALID_SPEC;
+        }
+        if (sp.order == 0u)
+        {
+            /* auto-order: edges + attenuation feed buttord/chebord math.
+             * Every edge actually used by the ord functions must lie in
+             * (0, fs/2), otherwise prewarping (tan near pi/2) explodes
+             * into a spurious NUMERICAL error instead of an honest
+             * INVALID_SPEC rejection. */
+            if (!(sp.stopband_atten_db > 0.0) ||
+                !isfinite(sp.stopband_atten_db) ||
+                !isfinite(sp.edge1_hz) || !isfinite(sp.edge2_hz))
+                hard = FCE_ERR_INVALID_SPEC;
+            if (!(sp.edge1_hz > 0.0) || !(sp.edge1_hz < 0.5 * sp.fs))
+                hard = FCE_ERR_INVALID_SPEC;
+            if ((sp.iir_type == FCE_IIR_BANDPASS ||
+                 sp.iir_type == FCE_IIR_BANDSTOP) &&
+                (!(sp.edge2_hz > 0.0) || !(sp.edge2_hz < 0.5 * sp.fs)))
                 hard = FCE_ERR_INVALID_SPEC;
         }
         if (sp.order > FCE_MAX_IIR_ORDER)
@@ -466,9 +491,11 @@ fce_status_t fce_generate(const fce_spec_t* spec,
         if (st == FCE_OK)
             result->num_taps = (uint16_t)taps;
 
+#if FCE_ENABLE_VALIDATION
         if (st == FCE_OK && auto_taps)
         {
-            /* Kaiser auto-taps spec check: stopband attenuation (LP) */
+            /* Kaiser auto-taps spec check: stopband attenuation (LP).
+             * (lives in fce_validate.c -> only when validation is enabled) */
             if (sp.fir_type == FCE_FIR_LOWPASS)
             {
                 double f0 = sp.fc1 + sp.transition_hz;
@@ -482,6 +509,7 @@ fce_status_t fce_generate(const fce_spec_t* spec,
                 }
             }
         }
+#endif
 #else
         st = FCE_ERR_UNSUPPORTED;
 #endif
@@ -505,10 +533,8 @@ fce_status_t fce_generate(const fce_spec_t* spec,
             st = fce_iir_auto_order(&sp, &auto_info);
             if (st == FCE_OK)
             {
-                if (auto_info.order > FCE_MAX_AUTO_ORDER)
-                {
+                if (auto_info.clamped)
                     result->flags |= FCE_FLAG_ORDER_CLAMPED;
-                }
                 order = auto_info.order;
                 sp.order = (uint16_t)order;
                 lay.order = order;
@@ -526,6 +552,7 @@ fce_status_t fce_generate(const fce_spec_t* spec,
         if (st == FCE_OK)
             st = fce_iir_design(&sp, result, &lay, base);
 
+#if FCE_ENABLE_VALIDATION
         if (st == FCE_OK && auto_order && sp.stopband_atten_db > 0.0)
         {
             /* spec check: attenuation at the stopband edge */
@@ -548,6 +575,7 @@ fce_status_t fce_generate(const fce_spec_t* spec,
                 }
             }
         }
+#endif /* FCE_ENABLE_VALIDATION */
 #else
         st = FCE_ERR_UNSUPPORTED;
 #endif
@@ -590,6 +618,11 @@ fce_status_t fce_generate(const fce_spec_t* spec,
                 result->status = FCE_ERR_UNSTABLE;
                 return result->status;
             }
+            /* numerically unresolved band just above the unit circle
+             * (margin < 0 but inside FCE_STABILITY_RADIUS_TOL) is
+             * acceptable - scipy judges the equivalent design stable;
+             * it is reported only via the SPEC_MARGINAL flag and the
+             * negative stability_margin */
             if (margin < FCE_STABILITY_MARGIN_MIN)
                 result->flags |= FCE_FLAG_SPEC_MARGINAL;
 

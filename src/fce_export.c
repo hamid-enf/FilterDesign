@@ -496,12 +496,31 @@ static int fce_json_double_array(fce_writer_t* w, const char* key,
     return ok;
 }
 
+/* float variant: values convert on the fly (no big stack buffer) */
+static int fce_json_float_array(fce_writer_t* w, const char* key,
+                                const float* v, uint32_t n)
+{
+    uint32_t i;
+    int ok = fce_w_printf(w, "  \"%s\": [", key);
+    for (i = 0; i < n; i++)
+        ok = ok && fce_w_printf(w, "%.9g%s", (double)v[i],
+                                (i + 1u < n) ? ", " : "");
+    ok = ok && fce_w_str(w, "]");
+    return ok;
+}
+
 fce_status_t fce_export_json(const fce_result_t* r, fce_writer_t* w)
 {
     int ok;
     uint32_t i;
     if (r == NULL || w == NULL || w->write == NULL)
         return FCE_ERR_INVALID_ARGUMENT;
+    /* require the primary array; without it the document would be
+     * malformed (the metadata block ends with a pending comma) */
+    if (r->kind == FCE_KIND_FIR && (r->h_f64 == NULL || r->num_taps == 0u))
+        return FCE_ERR_NOT_AVAILABLE;
+    if (r->kind == FCE_KIND_IIR && (r->sos_f64 == NULL || r->num_sections == 0u))
+        return FCE_ERR_NOT_AVAILABLE;
 
     ok = fce_w_str(w, "{\n");
     ok = ok && fce_w_printf(w, "  \"library\": \"FilterCoeff\",\n");
@@ -551,16 +570,9 @@ fce_status_t fce_export_json(const fce_result_t* r, fce_writer_t* w)
                                              r->num_taps);
         if (r->h_f32)
         {
-            /* convert to double for JSON */
-            double tmp[FCE_MAX_FIR_TAPS];
-            if (r->num_taps <= FCE_MAX_FIR_TAPS)
-            {
-                for (i = 0; i < r->num_taps; i++)
-                    tmp[i] = (double)r->h_f32[i];
-                ok = ok && fce_w_str(w, ",\n");
-                ok = ok && fce_json_double_array(w, "coefficients_f32", tmp,
-                                                 r->num_taps);
-            }
+            ok = ok && fce_w_str(w, ",\n");
+            ok = ok && fce_json_float_array(w, "coefficients_f32", r->h_f32,
+                                            r->num_taps);
         }
         if (r->q15)
         {
@@ -629,9 +641,13 @@ fce_status_t fce_export_json(const fce_result_t* r, fce_writer_t* w)
             }
             ok = ok && fce_w_str(w, "  ]");
         }
-        ok = ok && fce_w_printf(w, ",\n  \"scale\": %.17g,\n", r->scale);
+        ok = ok && fce_w_printf(w, ",\n  \"scale\": %.17g", r->scale);
         if (r->section_scales)
         {
+            /* leading comma of the previous key lives in the array
+             * helper's caller: without it (or with a stray trailing
+             * comma on "scale") the document is malformed JSON */
+            ok = ok && fce_w_str(w, ",\n");
             ok = ok && fce_json_double_array(w, "section_scales",
                                              r->section_scales,
                                              r->num_sections);

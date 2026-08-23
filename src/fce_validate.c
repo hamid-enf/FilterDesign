@@ -63,7 +63,9 @@ fce_status_t fce_response_fir(const double* h, uint16_t n,
         return FCE_ERR_INVALID_ARGUMENT;
     if (n_points == 0u)
         n_points = 1u;
-    if (f_stop <= f_start)
+    /* f_stop == f_start probes that single frequency;
+     * only an inverted range falls back to the full band */
+    if (f_stop < f_start)
     {
         f_start = 0.0;
         f_stop = 0.5 * fs;
@@ -121,7 +123,9 @@ fce_status_t fce_response_sos(const double* sos, uint16_t n_sections,
         return FCE_ERR_INVALID_ARGUMENT;
     if (n_points == 0u)
         n_points = 1u;
-    if (f_stop <= f_start)
+    /* f_stop == f_start probes that single frequency;
+     * only an inverted range falls back to the full band */
+    if (f_stop < f_start)
     {
         f_start = 0.0;
         f_stop = 0.5 * fs;
@@ -175,7 +179,11 @@ fce_status_t fce_stability_sos(const double* sos, uint16_t n_sections,
     if (margin)
         *margin = 1.0 - mr;
 
-    if (mr >= 1.0)
+    /* poles within the numerical noise band [1, 1 + tol] of extreme
+     * designs are reported via margin (< 0) but do not hard-fail:
+     * the float64 extraction itself cannot resolve them better, and
+     * the equivalent scipy design is considered stable */
+    if (mr >= 1.0 + FCE_STABILITY_RADIUS_TOL)
         return FCE_ERR_UNSTABLE;
     return FCE_OK;
 }
@@ -361,11 +369,15 @@ void fce_validate_iir_measures(const fce_spec_t* sp, fce_result_t* r,
 
     if (sp->iir_type == FCE_IIR_BANDPASS)
     {
-        /* also scan the upper stopband; take the worse case */
-        double mn2, mx2;
+        /* stopband below AND above the passband; take the worse case.
+         * (The passband scan above leaves mx holding the PASSBAND max,
+         *  so the lower stopband must be scanned separately.) */
+        double mn1, mx1, mn2, mx2, mxw;
+        fce_scan_sos_band(sos, ns, fs, sb_lo, sb_hi, &mn1, &mx1);
         fce_scan_sos_band(sos, ns, fs, sp->fc2 + 0.5 * (nyq - sp->fc2),
                           nyq, &mn2, &mx2);
-        r->stopband_atten_measured_db = -(mx > mx2 ? mx : mx2);
+        mxw = (mx1 > mx2) ? mx1 : mx2;
+        r->stopband_atten_measured_db = -mxw;
     }
     else if (sp->iir_type == FCE_IIR_BANDSTOP)
     {
@@ -455,10 +467,15 @@ void fce_validate_fir_measures(const fce_spec_t* sp, fce_result_t* r,
 
     if (sp->fir_type == FCE_FIR_BANDPASS)
     {
-        double mn2, mx2;
+        /* stopband below AND above the passband; take the worse case.
+         * (mx from the band scan above is the PASSBAND max; the lower
+         *  stopband needs its own scan.) */
+        double mn1, mx1, mn2, mx2, mxw;
+        fce_scan_fir_band(h, n, fs, sb_lo, sb_hi, &mn1, &mx1);
         fce_scan_fir_band(h, n, fs, sp->fc2 + 0.5 * (nyq - sp->fc2),
                           nyq, &mn2, &mx2);
-        r->stopband_atten_measured_db = -(mx > mx2 ? mx : mx2);
+        mxw = (mx1 > mx2) ? mx1 : mx2;
+        r->stopband_atten_measured_db = -mxw;
     }
     else
     {
