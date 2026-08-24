@@ -6,19 +6,36 @@
 #include <stdio.h>
 #include <string.h>
 
-#define EX_WS_SIZE (1u << 18)
+/*
+ * The examples call the design helpers sequentially, so they only need one
+ * workspace.  Keep the size configurable for embedded targets, for example:
+ *
+ *     -DEX_WS_SIZE=8192
+ *
+ * For a 101-tap FIR, fce_workspace_required() reports about 4.3 KiB.  The
+ * default below covers fce_workspace_required_max() with the repository's
+ * default limits (86,016 bytes) without reserving an unnecessarily large
+ * quarter megabyte on an MCU.
+ */
+#ifndef EX_WS_SIZE
+#define EX_WS_SIZE (96u * 1024u)
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #define EX_UNUSED __attribute__((unused))
+#define EX_ALIGN8 __attribute__((aligned(8)))
 #else
 #define EX_UNUSED
+#define EX_ALIGN8
 #endif
+
+/* One shared buffer avoids a separate 256 KiB .bss allocation per helper. */
+static uint8_t ex_workspace_mem[EX_WS_SIZE] EX_ALIGN8;
 
 /* design + print the markdown report to stdout */
 static EX_UNUSED void ex_design_and_report(const char* title, fce_spec_t* sp)
 {
-    static uint8_t mem[EX_WS_SIZE];
-    fce_workspace_t ws = { mem, sizeof(mem) };
+    fce_workspace_t ws = { ex_workspace_mem, sizeof(ex_workspace_mem) };
     fce_result_t r;
     fce_status_t st = fce_generate(sp, &r, &ws);
     char buf[16384];
@@ -39,8 +56,7 @@ static EX_UNUSED void ex_design_and_report(const char* title, fce_spec_t* sp)
 /* print the float coefficients of a FIR design */
 static EX_UNUSED void ex_print_fir(fce_spec_t* sp)
 {
-    static uint8_t mem[EX_WS_SIZE];
-    fce_workspace_t ws = { mem, sizeof(mem) };
+    fce_workspace_t ws = { ex_workspace_mem, sizeof(ex_workspace_mem) };
     fce_result_t r;
     fce_status_t st = fce_generate(sp, &r, &ws);
     uint32_t i;
@@ -65,8 +81,7 @@ static EX_UNUSED void ex_print_fir(fce_spec_t* sp)
 /* print the SOS of an IIR design */
 static EX_UNUSED void ex_print_sos(fce_spec_t* sp)
 {
-    static uint8_t mem[EX_WS_SIZE];
-    fce_workspace_t ws = { mem, sizeof(mem) };
+    fce_workspace_t ws = { ex_workspace_mem, sizeof(ex_workspace_mem) };
     fce_result_t r;
     fce_status_t st = fce_generate(sp, &r, &ws);
     char buf[16384];
