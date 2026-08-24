@@ -218,6 +218,66 @@ static void test_group_delay_sos_sign(void)
     }
 }
 
+static void test_bandstop_stopband_metric(void)
+{
+    /* Regression: fc1/fc2 of a windowed FIR bandstop are MIDPOINTS of
+     * the transition bands (each sits at -6 dB), so measuring the
+     * stopband over the full [fc1, fc2] used to report ~6 dB of
+     * "attenuation". The metric is now taken over the inner half of
+     * the stopband. (SciPy cross-check for this spec: the -6 dB points
+     * are exactly at 1 kHz and 3 kHz; the inner half floors at ~20 dB
+     * because the 2 kHz stopband is narrow relative to the window's
+     * transition width.) */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 1000; sp.fc2 = 3000; sp.num_taps = 121;
+    sp.window = FCE_WIN_BLACKMAN;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.stopband_atten_measured_db > 15.0); /* not the ~6 dB bug */
+    TEST_ASSERT(r.stopband_atten_measured_db < 80.0); /* not a passband */
+}
+
+static double g_gd_dc = 0.0;
+static int g_gd_dc_got = 0;
+static bool gd_dc_cb(void* ctx, const fce_response_point_t* pt)
+{
+    (void)ctx;
+    g_gd_dc = pt->group_delay;
+    g_gd_dc_got++;
+    return false; /* single point */
+}
+
+static void test_gd_at_response_zero(void)
+{
+    /* Regression: a highpass has a response zero at DC, where the
+     * analytic group-delay ratio is 0/0. The scan used to report
+     * arbitrary values there (e.g. -2.6 samples); it must report 0. */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV1;
+    sp.iir_type = FCE_IIR_HIGHPASS;
+    sp.fs = 48000; sp.fc1 = 6000; sp.order = 8;
+    sp.passband_ripple_db = 0.5;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+
+    g_gd_dc = 0.0; g_gd_dc_got = 0;
+    TEST_OK(fce_response_sos(r.sos_f64, r.num_sections, r.fs, 1, 0.0,
+                             0.0, gd_dc_cb, NULL));
+    TEST_ASSERT(g_gd_dc_got == 1);
+    TEST_NEAR(g_gd_dc, 0.0, 1e-12);
+}
+
 int main(void)
 {
     test_response_sos();
@@ -227,6 +287,8 @@ int main(void)
     test_group_delay();
     test_group_delay_sos_sign();
     test_bandpass_stopband_metric();
+    test_bandstop_stopband_metric();
+    test_gd_at_response_zero();
     printf("test_validate: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;
 }

@@ -103,7 +103,10 @@ fce_status_t fce_response_fir(const double* h, uint16_t n,
              * im = di*re - dr*im */
             {
                 double m2 = hc.re * hc.re + hc.im * hc.im;
-                if (m2 > 0.0)
+                /* at (or within numerical floor of) a response zero the
+                 * ratio is 0/0 and the analytic value is undefined
+                 * (e.g. DC of a highpass): report 0 instead of noise */
+                if (m2 > 1e-24)
                     pt.group_delay = -(di * hc.re - dr * hc.im) / m2;
             }
         }
@@ -143,6 +146,14 @@ fce_status_t fce_response_sos(const double* sos, uint16_t n_sections,
         pt.group_delay = 0.0;
         for (s = 0; s < n_sections; s++)
             pt.group_delay += fce_biquad_group_delay(sos + 5u * s, w);
+        /* at (or within numerical floor of) a response zero the summed
+         * section delays are 0/0 noise (e.g. DC of a highpass whose
+         * numerator vanishes): report 0 instead */
+        {
+            double m2 = hc.re * hc.re + hc.im * hc.im;
+            if (m2 <= 1e-24)
+                pt.group_delay = 0.0;
+        }
         if (!cb(ctx, &pt))
             break;
     }
@@ -454,7 +465,13 @@ void fce_validate_fir_measures(const fce_spec_t* sp, fce_result_t* r,
     else if (sp->fir_type == FCE_FIR_BANDSTOP)
     {
         pb_lo = 0.0; pb_hi = sp->fc1;
-        sb_lo = sp->fc1; sb_hi = sp->fc2;
+        /* fc1/fc2 are MIDPOINTS of the transition bands (each sits at
+         * -6 dB), so scanning the full [fc1, fc2] would report ~6 dB
+         * of "attenuation".  Measure the inner half of the stopband,
+         * where the window's main-lobe floor actually is. (Same
+         * rationale as the stopband insets used for LP/HP above.) */
+        sb_lo = sp->fc1 + 0.25 * (sp->fc2 - sp->fc1);
+        sb_hi = sp->fc2 - 0.25 * (sp->fc2 - sp->fc1);
     }
     else
     {
