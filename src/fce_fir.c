@@ -18,6 +18,10 @@
 /* windows                                                             */
 /* ------------------------------------------------------------------ */
 
+/* Tukey shape parameter: the spec carries no alpha field, so a fixed
+ * alpha (half-cosine taper over the outer quarters) is used. */
+#define FCE_TUKEY_DEFAULT_ALPHA 0.5
+
 double fce_window_value(fce_window_t win, uint32_t n, uint32_t N,
                         double kaiser_beta, double tukey_alpha)
 {
@@ -77,9 +81,70 @@ double fce_window_value(fce_window_t win, uint32_t n, uint32_t N,
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* ideal impulse response                                              */
-/* ------------------------------------------------------------------ */
+/*
+ * Half-width of the transition band of a windowed design, in Hz: the
+ * distance from the cutoff (the -6 dB midpoint) to the edge of the
+ * window's main lobe (first null of the window's DTFT). The windowed
+ * response is flat within its sidelobe floor only outside that region,
+ * so the validation insets the passband ripple band by this amount.
+ *
+ * Fixed windows (first null in units of fs/M, verified against the
+ * exact window DTFTs):
+ *   rectangular 1, bartlett 2, hann 2, hamming 2, blackman 3,
+ *   blackman-harris 4, tukey (fixed alpha = FCE_TUKEY_DEFAULT_ALPHA) 4
+ * Kaiser: half of the design transition width
+ *   dw = (A - 7.95) / (2.285 * (M - 1))   (same relation as
+ *   fce_kaiser_taps), i.e. dw/2 in Hz.
+ */
+double fce_window_transition_half_hz(fce_window_t win, double atten_db,
+                                     double kaiser_beta,
+                                     uint32_t num_taps, double fs)
+{
+    double k;
+    if (num_taps < 2u || fs <= 0.0)
+        return 0.0;
+
+    switch (win)
+    {
+    case FCE_WIN_RECTANGULAR:
+        k = 1.0;
+        break;
+
+    case FCE_WIN_BARTLETT:
+    case FCE_WIN_HANN:
+    case FCE_WIN_HAMMING:
+        k = 2.0;
+        break;
+
+    case FCE_WIN_BLACKMAN:
+        k = 3.0;
+        break;
+
+    case FCE_WIN_BLACKMAN_HARRIS:
+    case FCE_WIN_TUKEY:
+        k = 4.0;
+        break;
+
+    case FCE_WIN_KAISER:
+    {
+        double a = (atten_db > 0.0) ? atten_db : 0.0;
+        if (a <= 0.0 && kaiser_beta > 0.5)
+            a = kaiser_beta / 0.1102 + 8.7; /* invert fce_kaiser_beta */
+        if (a > 21.0)
+        {
+            double dw = (a - 7.95) / (2.285 * (double)(num_taps - 1u));
+            return dw * 0.5 * fs / (2.0 * FCE_PI);
+        }
+        k = 2.0; /* unknown attenuation: Hann-like default */
+        break;
+    }
+
+    default:
+        k = 2.0;
+        break;
+    }
+    return k * fs / (double)num_taps;
+}
 
 static void fce_fir_ideal(fce_fir_type_t type,
                           double fs, double fc1, double fc2,
@@ -326,7 +391,8 @@ fce_status_t fce_fir_design(const fce_spec_t* sp, fce_result_t* r,
 
     /* ---- window ---- */
     for (n = 0; n < N; n++)
-        window[n] = fce_window_value(sp->window, n, N, beta, 0.5);
+        window[n] = fce_window_value(sp->window, n, N, beta,
+                                     FCE_TUKEY_DEFAULT_ALPHA);
 
     for (n = 0; n < N; n++)
         h[n] = ideal[n] * window[n];

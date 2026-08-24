@@ -103,7 +103,10 @@ fce_status_t fce_response_fir(const double* h, uint16_t n,
              * im = di*re - dr*im */
             {
                 double m2 = hc.re * hc.re + hc.im * hc.im;
-                if (m2 > 0.0)
+                /* at (or within numerical floor of) a response zero the
+                 * ratio is 0/0 and the analytic value is undefined
+                 * (e.g. DC of a highpass): report 0 instead of noise */
+                if (m2 > 1e-24)
                     pt.group_delay = -(di * hc.re - dr * hc.im) / m2;
             }
         }
@@ -143,6 +146,14 @@ fce_status_t fce_response_sos(const double* sos, uint16_t n_sections,
         pt.group_delay = 0.0;
         for (s = 0; s < n_sections; s++)
             pt.group_delay += fce_biquad_group_delay(sos + 5u * s, w);
+        /* at (or within numerical floor of) a response zero the summed
+         * section delays are 0/0 noise (e.g. DC of a highpass whose
+         * numerator vanishes): report 0 instead */
+        {
+            double m2 = hc.re * hc.re + hc.im * hc.im;
+            if (m2 <= 1e-24)
+                pt.group_delay = 0.0;
+        }
         if (!cb(ctx, &pt))
             break;
     }
@@ -435,26 +446,51 @@ void fce_validate_fir_measures(const fce_spec_t* sp, fce_result_t* r,
     double nyq = 0.5 * fs;
     double pb_lo, pb_hi, sb_lo, sb_hi;
     double mn, mx;
+    /* transition half-width: the windowed response is only flat within
+     * its sidelobe floor this far away from the cutoff (the -6 dB
+     * midpoint).  The passband ripple band is inset by it so the
+     * metric reflects the flat passband, not the transition (which
+     * would always read ~6 dB). */
+    double dtrans = fce_window_transition_half_hz(sp->window,
+                                                  sp->stopband_atten_db,
+                                                  r->kaiser_beta, n, fs);
 
     if (sp->fir_type == FCE_FIR_LOWPASS)
     {
-        pb_lo = 0.0; pb_hi = sp->fc1;
+        pb_lo = 0.0; pb_hi = sp->fc1 - dtrans;
+        if (pb_hi < 0.0)
+            pb_hi = sp->fc1; /* degenerate spec: keep the full band */
         sb_lo = sp->fc1 + 0.5 * (nyq - sp->fc1); sb_hi = nyq;
     }
     else if (sp->fir_type == FCE_FIR_HIGHPASS)
     {
-        pb_lo = sp->fc1; pb_hi = nyq;
+        pb_lo = sp->fc1 + dtrans;
+        if (pb_lo > nyq)
+            pb_lo = sp->fc1;
+        pb_hi = nyq;
         sb_lo = 0.0; sb_hi = 0.5 * sp->fc1;
     }
     else if (sp->fir_type == FCE_FIR_BANDPASS)
     {
-        pb_lo = sp->fc1; pb_hi = sp->fc2;
+        pb_lo = sp->fc1 + dtrans; pb_hi = sp->fc2 - dtrans;
+        if (pb_hi < pb_lo)
+        {
+            pb_lo = sp->fc1; pb_hi = sp->fc2; /* degenerate spec */
+        }
         sb_lo = 0.0; sb_hi = 0.5 * sp->fc1;
     }
     else if (sp->fir_type == FCE_FIR_BANDSTOP)
     {
-        pb_lo = 0.0; pb_hi = sp->fc1;
-        sb_lo = sp->fc1; sb_hi = sp->fc2;
+        pb_lo = 0.0; pb_hi = sp->fc1 - dtrans;
+        if (pb_hi < 0.0)
+            pb_hi = sp->fc1;
+        /* fc1/fc2 are MIDPOINTS of the transition bands (each sits at
+         * -6 dB), so scanning the full [fc1, fc2] would report ~6 dB
+         * of "attenuation".  Measure the inner half of the stopband,
+         * where the window's main-lobe floor actually is. (Same
+         * rationale as the stopband insets used for LP/HP above.) */
+        sb_lo = sp->fc1 + 0.25 * (sp->fc2 - sp->fc1);
+        sb_hi = sp->fc2 - 0.25 * (sp->fc2 - sp->fc1);
     }
     else
     {
@@ -464,6 +500,20 @@ void fce_validate_fir_measures(const fce_spec_t* sp, fce_result_t* r,
 
     fce_scan_fir_band(h, n, fs, pb_lo, pb_hi, &mn, &mx);
     r->passband_ripple_measured_db = mx - mn;
+
+    if (sp->fir_type == FCE_FIR_BANDSTOP)
+    {
+        /* the UPPER passband [fc2, nyq] is a real passband too - take
+         * the worse ripple of the two (parity with the IIR bandstop). */
+        double mn2, mx2, up_lo, up_hi;
+        up_lo = sp->fc2 + dtrans;
+        if (up_lo > nyq)
+            up_lo = sp->fc2;
+        up_hi = nyq;
+        fce_scan_fir_band(h, n, fs, up_lo, up_hi, &mn2, &mx2);
+        if ((mx2 - mn2) > (r->passband_ripple_measured_db))
+            r->passband_ripple_measured_db = mx2 - mn2;
+    }
 
     if (sp->fir_type == FCE_FIR_BANDPASS)
     {

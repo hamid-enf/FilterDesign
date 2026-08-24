@@ -16,6 +16,16 @@
 static int fce_w_printf(fce_writer_t* w, const char* fmt, ...);
 static int fce_w_str(fce_writer_t* w, const char* s);
 
+/* dB values are clamped at 20log10(1e-300) = -6000 dB when the gain is
+ * at/below the float64 floor (e.g. a filter with a zero at Nyquist).
+ * Rendering that raw looks like a broken number; show a floor note. */
+static int fce_w_db_row(fce_writer_t* w, const char* label, double db)
+{
+    if (db <= -6000.0 + 1e-3)
+        return fce_w_printf(w, "| %s | < -600 dB |\n", label);
+    return fce_w_printf(w, "| %s | %.4f dB |\n", label, db);
+}
+
 /* ------------------------------------------------------------------ */
 /* writers                                                             */
 /* ------------------------------------------------------------------ */
@@ -734,9 +744,8 @@ fce_status_t fce_export_report(const fce_result_t* r, fce_writer_t* w)
         ok = ok && fce_w_printf(w, "| Stability margin | %.9g |\n",
                                 r->stability_margin);
     }
-    ok = ok && fce_w_printf(w, "| DC gain | %.4f dB |\n", r->dc_gain_db);
-    ok = ok && fce_w_printf(w, "| Nyquist gain | %.4f dB |\n",
-                            r->nyquist_gain_db);
+    ok = ok && fce_w_db_row(w, "DC gain", r->dc_gain_db);
+    ok = ok && fce_w_db_row(w, "Nyquist gain", r->nyquist_gain_db);
     ok = ok && fce_w_printf(w, "| Passband ripple | %.6f dB |\n",
                             r->passband_ripple_measured_db);
     ok = ok && fce_w_printf(w, "| Stopband attenuation | %.4f dB |\n",

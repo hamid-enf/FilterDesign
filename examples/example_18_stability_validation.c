@@ -7,8 +7,15 @@ static bool print_every_64th(void* ctx, const fce_response_point_t* pt)
 {
     (void)ctx;
     if ((g_count++ % 64u) == 0u)
-        printf("  %8.0f Hz : %7.2f dB, GD %.1f samples\n",
-               pt->f_hz, pt->mag_db, pt->group_delay);
+    {
+        char dbtxt[32];
+        if (pt->mag_db <= -6000.0 + 1e-3)
+            snprintf(dbtxt, sizeof(dbtxt), "  < -600 dB"); /* floor */
+        else
+            snprintf(dbtxt, sizeof(dbtxt), "%7.2f dB", pt->mag_db);
+        printf("  %8.0f Hz : %s, GD %.1f samples\n",
+               pt->f_hz, dbtxt, pt->group_delay);
+    }
     return true;
 }
 

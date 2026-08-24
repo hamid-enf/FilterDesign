@@ -218,6 +218,147 @@ static void test_group_delay_sos_sign(void)
     }
 }
 
+static void test_bandstop_stopband_metric(void)
+{
+    /* Regression: fc1/fc2 of a windowed FIR bandstop are MIDPOINTS of
+     * the transition bands (each sits at -6 dB), so measuring the
+     * stopband over the full [fc1, fc2] used to report ~6 dB of
+     * "attenuation". The metric is now taken over the inner half of
+     * the stopband. (SciPy cross-check for this spec: the -6 dB points
+     * are exactly at 1 kHz and 3 kHz; the inner half floors at ~20 dB
+     * because the 2 kHz stopband is narrow relative to the window's
+     * transition width.) */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 1000; sp.fc2 = 3000; sp.num_taps = 121;
+    sp.window = FCE_WIN_BLACKMAN;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.stopband_atten_measured_db > 15.0); /* not the ~6 dB bug */
+    TEST_ASSERT(r.stopband_atten_measured_db < 80.0); /* not a passband */
+}
+
+static double g_gd_dc = 0.0;
+static int g_gd_dc_got = 0;
+static bool gd_dc_cb(void* ctx, const fce_response_point_t* pt)
+{
+    (void)ctx;
+    g_gd_dc = pt->group_delay;
+    g_gd_dc_got++;
+    return false; /* single point */
+}
+
+static void test_gd_at_response_zero(void)
+{
+    /* Regression: a highpass has a response zero at DC, where the
+     * analytic group-delay ratio is 0/0. The scan used to report
+     * arbitrary values there (e.g. -2.6 samples); it must report 0. */
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_IIR;
+    sp.iir_family = FCE_IIR_CHEBYSHEV1;
+    sp.iir_type = FCE_IIR_HIGHPASS;
+    sp.fs = 48000; sp.fc1 = 6000; sp.order = 8;
+    sp.passband_ripple_db = 0.5;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+
+    g_gd_dc = 0.0; g_gd_dc_got = 0;
+    TEST_OK(fce_response_sos(r.sos_f64, r.num_sections, r.fs, 1, 0.0,
+                             0.0, gd_dc_cb, NULL));
+    TEST_ASSERT(g_gd_dc_got == 1);
+    TEST_NEAR(g_gd_dc, 0.0, 1e-12);
+}
+
+static void test_fir_passband_ripple_metric(void)
+{
+    /* Regression: windowed FIR cutoffs sit at the -6 dB MIDPOINT of the
+     * transition band, so the passband ripple used to be measured over
+     * the full band up to the cutoff and always read ~6 dB. The band is
+     * now inset by the window's transition half-width; the metric must
+     * reflect the flat passband (window sidelobe level). Thresholds are
+     * a few dB above the measured values (rect: Gibbs ~1.1 dB). */
+    struct { fce_window_t win; double max_db; } cases[] = {
+        { FCE_WIN_RECTANGULAR,     1.5 },
+        { FCE_WIN_BARTLETT,        1.0 },
+        { FCE_WIN_HANN,            0.2 },
+        { FCE_WIN_HAMMING,         0.2 },
+        { FCE_WIN_BLACKMAN,        0.1 },
+        { FCE_WIN_KAISER,          0.1 },
+        { FCE_WIN_BLACKMAN_HARRIS, 0.1 },
+        { FCE_WIN_TUKEY,           0.3 },
+    };
+    uint32_t i;
+    fce_spec_t sp;
+    fce_result_t r;
+    fce_workspace_t ws = { ws_mem, sizeof(ws_mem) };
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        fce_spec_defaults(&sp);
+        sp.kind = FCE_KIND_FIR;
+        sp.fir_type = FCE_FIR_LOWPASS;
+        sp.fs = 48000; sp.fc1 = 5000; sp.num_taps = 101;
+        sp.window = cases[i].win;
+        sp.stopband_atten_db = 60.0;
+        sp.precision = FCE_PRECISION_FLOAT64;
+        TEST_OK(fce_generate(&sp, &r, &ws));
+        TEST_ASSERT(r.passband_ripple_measured_db < cases[i].max_db);
+    }
+
+    /* highpass and bandpass get the same inset on their passband edge */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_HIGHPASS;
+    sp.fs = 48000; sp.fc1 = 2000; sp.num_taps = 101;
+    sp.window = FCE_WIN_HANN;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.passband_ripple_measured_db < 0.2);
+
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDPASS;
+    sp.fs = 48000; sp.fc1 = 4000; sp.fc2 = 8000; sp.num_taps = 151;
+    sp.window = FCE_WIN_HAMMING;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.passband_ripple_measured_db < 0.2);
+
+    /* bandstop: the metric is the worse ripple of the LOWER and UPPER
+     * passbands (parity with the IIR bandstop). Wide passbands -> flat
+     * region exists on both sides. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 5000; sp.fc2 = 9000; sp.num_taps = 121;
+    sp.window = FCE_WIN_BLACKMAN;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.passband_ripple_measured_db < 0.1);
+
+    /* degenerate spec: lower passband (1 kHz) is narrower than the
+     * transition half-width (Blackman, 121 taps: ~1.19 kHz), so no flat
+     * sub-band exists and the full [0, fc1] is measured: the ripple is
+     * capped by the -6 dB transition midpoint (~6.0 dB), not larger. */
+    fce_spec_defaults(&sp);
+    sp.kind = FCE_KIND_FIR;
+    sp.fir_type = FCE_FIR_BANDSTOP;
+    sp.fs = 48000; sp.fc1 = 1000; sp.fc2 = 3000; sp.num_taps = 121;
+    sp.window = FCE_WIN_BLACKMAN;
+    sp.precision = FCE_PRECISION_FLOAT64;
+    TEST_OK(fce_generate(&sp, &r, &ws));
+    TEST_ASSERT(r.passband_ripple_measured_db < 6.5);
+}
+
 int main(void)
 {
     test_response_sos();
@@ -227,6 +368,9 @@ int main(void)
     test_group_delay();
     test_group_delay_sos_sign();
     test_bandpass_stopband_metric();
+    test_bandstop_stopband_metric();
+    test_fir_passband_ripple_metric();
+    test_gd_at_response_zero();
     printf("test_validate: %d run, %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed ? 1 : 0;
 }
